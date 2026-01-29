@@ -59,6 +59,10 @@ MeshCore uses a standard "Public" channel configuration (USA/Canada Recommended 
 
 This proxy is configured to match MeshCore's standard "Public" channel settings for maximum compatibility.
 
+![MeshCore Configuration - Public Channel](Screenshot.png)
+
+*MeshCore configuration interface showing the standard "Public" channel settings (USA/Canada Recommended Preset)*
+
 ### MeshCore Packet Format
 
 Wire format (as defined in `Packet.cpp`):
