@@ -7,6 +7,9 @@ class App {
             meshcoreFreq: 910525000,
             meshtasticFreq: 906875000,
             currentProtocol: 0,
+            switchInterval: 100,
+            meshcoreBandwidth: 6,
+            meshtasticBandwidth: 8,
             meshcoreRx: 0,
             meshtasticRx: 0,
             meshcoreTx: 0,
@@ -18,7 +21,8 @@ class App {
             lastActivityTime: null,
             protocolSwitches: 0,
             lastProtocol: null,
-            connectionStartTime: null
+            connectionStartTime: null,
+            firmwareInfoLogged: false // Track if we've logged firmware info
         };
         
         this.statsInterval = null;
@@ -45,6 +49,18 @@ class App {
         document.getElementById('testMeshCoreBtn').addEventListener('click', () => this.sendTestMessage(0));
         document.getElementById('testMeshtasticBtn').addEventListener('click', () => this.sendTestMessage(1));
         document.getElementById('testBothBtn').addEventListener('click', () => this.sendTestMessage(2));
+        
+        // Form submission
+        document.getElementById('controlForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.saveSettings();
+        });
+        
+        // Protocol parameter change handlers
+        document.getElementById('meshcoreFreqInput').addEventListener('change', () => this.saveMeshCoreParams());
+        document.getElementById('meshcoreBwSelect').addEventListener('change', () => this.saveMeshCoreParams());
+        document.getElementById('meshtasticFreqInput').addEventListener('change', () => this.saveMeshtasticParams());
+        document.getElementById('meshtasticBwSelect').addEventListener('change', () => this.saveMeshtasticParams());
     }
 
     async connect() {
@@ -56,6 +72,7 @@ class App {
             this.state.connectionStartTime = Date.now();
             this.state.lastProtocol = null;
             this.state.protocolSwitches = 0;
+            this.state.firmwareInfoLogged = false; // Reset so we log firmware info on reconnect
             window.UI.updateConnectionStatus(true);
             window.UI.enableButtons(true);
             window.UI.addLogEntry('Connected successfully', 'success');
@@ -77,6 +94,7 @@ class App {
         
         this.state.connected = false;
         this.state.connectionStartTime = null;
+        this.state.firmwareInfoLogged = false; // Reset for next connection
         
         try {
             await window.serialComm.disconnect();
@@ -210,6 +228,62 @@ class App {
         await window.serialComm.sendTestMessage(protocol);
     }
 
+    async saveSettings() {
+        const protocolSelect = document.getElementById('protocolSelect');
+        const intervalSelect = document.getElementById('switchIntervalSelect');
+        
+        const protocol = parseInt(protocolSelect.value);
+        const interval = parseInt(intervalSelect.value);
+        
+        // Set switch interval first
+        if (interval !== this.state.switchInterval) {
+            const intervalText = interval === 0 ? 'Off (Manual)' : `${interval}ms`;
+            window.UI.addLogEntry(`Setting switch interval to ${intervalText}...`, 'info');
+            await window.serialComm.setSwitchInterval(interval);
+            this.state.switchInterval = interval;
+        }
+        
+        // Set protocol if not auto-switch
+        if (protocol !== 2) {
+            const protocolName = protocol === 0 ? 'MeshCore' : 'Meshtastic';
+            window.UI.addLogEntry(`Setting protocol to ${protocolName}...`, 'info');
+            await window.serialComm.setProtocol(protocol);
+        } else if (interval !== 0) {
+            // Auto-switch mode - just log
+            window.UI.addLogEntry('Auto-switching enabled', 'info');
+        }
+        
+        window.UI.addLogEntry('Settings saved', 'info');
+    }
+
+    async saveMeshCoreParams() {
+        const freqInput = document.getElementById('meshcoreFreqInput');
+        const bwSelect = document.getElementById('meshcoreBwSelect');
+        const frequencyHz = Math.round(parseFloat(freqInput.value) * 1000000);
+        const bandwidth = parseInt(bwSelect.value);
+        
+        if (frequencyHz >= 902000000 && frequencyHz <= 928000000 && bandwidth >= 0 && bandwidth <= 9) {
+            window.UI.addLogEntry(`Setting MeshCore: ${(frequencyHz/1000000).toFixed(3)} MHz, BW=${bandwidth}`, 'info');
+            await window.serialComm.setMeshCoreParams(frequencyHz, bandwidth);
+        } else {
+            window.UI.addLogEntry('Invalid MeshCore parameters', 'error');
+        }
+    }
+
+    async saveMeshtasticParams() {
+        const freqInput = document.getElementById('meshtasticFreqInput');
+        const bwSelect = document.getElementById('meshtasticBwSelect');
+        const frequencyHz = Math.round(parseFloat(freqInput.value) * 1000000);
+        const bandwidth = parseInt(bwSelect.value);
+        
+        if (frequencyHz >= 902000000 && frequencyHz <= 928000000 && bandwidth >= 0 && bandwidth <= 9) {
+            window.UI.addLogEntry(`Setting Meshtastic: ${(frequencyHz/1000000).toFixed(3)} MHz, BW=${bandwidth}`, 'info');
+            await window.serialComm.setMeshtasticParams(frequencyHz, bandwidth);
+        } else {
+            window.UI.addLogEntry('Invalid Meshtastic parameters', 'error');
+        }
+    }
+
     handleMessage(respId, data) {
         switch (respId) {
             case window.Protocol.RESP_INFO_REPLY:
@@ -218,9 +292,21 @@ class App {
                     this.state.meshcoreFreq = info.meshcoreFreq;
                     this.state.meshtasticFreq = info.meshtasticFreq;
                     this.state.currentProtocol = info.currentProtocol;
+                    this.state.switchInterval = info.switchInterval;
+                    this.state.meshcoreBandwidth = info.meshcoreBandwidth;
+                    this.state.meshtasticBandwidth = info.meshtasticBandwidth;
                     window.UI.updateFrequencies(info.meshcoreFreq, info.meshtasticFreq);
                     window.UI.updateProtocolStatus(info.currentProtocol);
-                    window.UI.addLogEntry(`Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Switch Interval: ${info.switchInterval}ms`, 'info');
+                    window.UI.updateSwitchInterval(info.switchInterval);
+                    window.UI.updateProtocolSelect(info.currentProtocol, info.switchInterval);
+                    window.UI.updateProtocolParams(info.meshcoreFreq, info.meshcoreBandwidth, info.meshtasticFreq, info.meshtasticBandwidth);
+                    
+                    // Only log firmware info once on first connection
+                    if (!this.state.firmwareInfoLogged) {
+                        const intervalText = info.switchInterval === 0 ? 'Off (Manual)' : `${info.switchInterval}ms`;
+                        window.UI.addLogEntry(`Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Switch Interval: ${intervalText}`, 'info');
+                        this.state.firmwareInfoLogged = true;
+                    }
                 }
                 break;
                 
@@ -268,7 +354,12 @@ class App {
                 break;
                 
             case window.Protocol.RESP_ERROR:
-                window.UI.addLogEntry('Error from device', 'error');
+                const errorMsg = window.Protocol.decodeError(data);
+                if (errorMsg && errorMsg.length > 0) {
+                    window.UI.addLogEntry(`Error: ${errorMsg}`, 'error');
+                } else {
+                    window.UI.addLogEntry('Error from device (no details)', 'error');
+                }
                 break;
         }
     }

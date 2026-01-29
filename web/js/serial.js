@@ -101,6 +101,45 @@ class SerialComm {
         await this.sendCommand(window.Protocol.CMD_SEND_TEST, data);
     }
 
+    async setSwitchInterval(intervalMs) {
+        // Send interval as 2 bytes (little-endian)
+        const data = new Uint8Array([
+            intervalMs & 0xFF,        // Low byte
+            (intervalMs >> 8) & 0xFF // High byte
+        ]);
+        await this.sendCommand(window.Protocol.CMD_SET_SWITCH_INTERVAL, data);
+    }
+
+    async setProtocol(protocol) {
+        // protocol: 0 = MeshCore, 1 = Meshtastic
+        const data = new Uint8Array([protocol]);
+        await this.sendCommand(window.Protocol.CMD_SET_PROTOCOL, data);
+    }
+
+    async setMeshCoreParams(frequencyHz, bandwidth) {
+        // 4 bytes frequency (little-endian) + 1 byte bandwidth
+        const data = new Uint8Array([
+            frequencyHz & 0xFF,
+            (frequencyHz >> 8) & 0xFF,
+            (frequencyHz >> 16) & 0xFF,
+            (frequencyHz >> 24) & 0xFF,
+            bandwidth & 0xFF
+        ]);
+        await this.sendCommand(window.Protocol.CMD_SET_MESHCORE_PARAMS, data);
+    }
+
+    async setMeshtasticParams(frequencyHz, bandwidth) {
+        // 4 bytes frequency (little-endian) + 1 byte bandwidth
+        const data = new Uint8Array([
+            frequencyHz & 0xFF,
+            (frequencyHz >> 8) & 0xFF,
+            (frequencyHz >> 16) & 0xFF,
+            (frequencyHz >> 24) & 0xFF,
+            bandwidth & 0xFF
+        ]);
+        await this.sendCommand(window.Protocol.CMD_SET_MESHTASTIC_PARAMS, data);
+    }
+
     async readLoop() {
         const decoder = new TextDecoder();
         

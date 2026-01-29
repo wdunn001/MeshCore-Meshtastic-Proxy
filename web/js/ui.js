@@ -125,6 +125,63 @@ const UI = {
         if (lastActivityEl) lastActivityEl.textContent = lastActivity || '--';
     },
 
+    updateSwitchInterval(intervalMs) {
+        const select = document.getElementById('switchIntervalSelect');
+        const display = document.getElementById('switchIntervalDisplay');
+        
+        if (select) {
+            // Find matching option or set to closest
+            let found = false;
+            for (let option of select.options) {
+                if (parseInt(option.value) === intervalMs) {
+                    select.value = option.value;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && intervalMs === 0) {
+                select.value = '0';
+            } else if (!found) {
+                // Set to closest value
+                select.value = '100';
+            }
+        }
+        if (display) {
+            const intervalText = intervalMs === 0 ? 'Off (Manual)' : `${intervalMs}ms`;
+            display.textContent = `Current: ${intervalText}`;
+        }
+    },
+
+    updateProtocolSelect(currentProtocol, switchInterval) {
+        const protocolSelect = document.getElementById('protocolSelect');
+        const protocolDisplay = document.getElementById('protocolDisplay');
+        
+        if (protocolSelect && protocolDisplay) {
+            if (switchInterval === 0) {
+                // Manual mode - show current protocol
+                protocolSelect.value = currentProtocol.toString();
+                const protocolName = currentProtocol === 0 ? 'MeshCore' : 'Meshtastic';
+                protocolDisplay.textContent = `Current: ${protocolName} (Manual)`;
+            } else {
+                // Auto-switch mode
+                protocolSelect.value = '2';
+                protocolDisplay.textContent = `Current: Auto-Switch (${switchInterval}ms)`;
+            }
+        }
+    },
+
+    updateProtocolParams(meshcoreFreq, meshcoreBw, meshtasticFreq, meshtasticBw) {
+        const meshcoreFreqInput = document.getElementById('meshcoreFreqInput');
+        const meshcoreBwSelect = document.getElementById('meshcoreBwSelect');
+        const meshtasticFreqInput = document.getElementById('meshtasticFreqInput');
+        const meshtasticBwSelect = document.getElementById('meshtasticBwSelect');
+        
+        if (meshcoreFreqInput) meshcoreFreqInput.value = (meshcoreFreq / 1000000).toFixed(3);
+        if (meshcoreBwSelect) meshcoreBwSelect.value = meshcoreBw.toString();
+        if (meshtasticFreqInput) meshtasticFreqInput.value = (meshtasticFreq / 1000000).toFixed(3);
+        if (meshtasticBwSelect) meshtasticBwSelect.value = meshtasticBw.toString();
+    },
+
     updateFrequencies(meshcoreFreq, meshtasticFreq) {
         document.getElementById('meshcoreFreq').textContent = (meshcoreFreq / 1000000).toFixed(3) + ' MHz';
         document.getElementById('meshtasticFreq').textContent = (meshtasticFreq / 1000000).toFixed(3) + ' MHz';
@@ -155,6 +212,12 @@ const UI = {
     addLogEntry(message, type = 'info') {
         const log = document.getElementById('eventLog');
         const entry = document.createElement('div');
+        
+        // Auto-detect error type if message starts with "ERR:"
+        if (message.startsWith('ERR:') && type === 'info') {
+            type = 'error';
+        }
+        
         entry.className = `log-entry ${type}`;
         const timestamp = new Date().toLocaleTimeString();
         entry.textContent = `[${timestamp}] ${message}`;
@@ -173,6 +236,13 @@ const UI = {
         document.getElementById('testMeshCoreBtn').disabled = !connected;
         document.getElementById('testMeshtasticBtn').disabled = !connected;
         document.getElementById('testBothBtn').disabled = !connected;
+        document.getElementById('saveSettingsBtn').disabled = !connected;
+        document.getElementById('protocolSelect').disabled = !connected;
+        document.getElementById('switchIntervalSelect').disabled = !connected;
+        document.getElementById('meshcoreFreqInput').disabled = !connected;
+        document.getElementById('meshcoreBwSelect').disabled = !connected;
+        document.getElementById('meshtasticFreqInput').disabled = !connected;
+        document.getElementById('meshtasticBwSelect').disabled = !connected;
     }
 };
 

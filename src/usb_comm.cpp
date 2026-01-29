@@ -16,9 +16,18 @@ enum ProtocolState {
     LISTENING_MESHTASTIC
 };
 extern ProtocolState currentProtocol;
+extern uint16_t protocolSwitchIntervalMs; // Configurable switch interval
+extern bool autoSwitchEnabled; // Auto-switching enabled flag
+extern uint32_t meshcoreFrequencyHz;
+extern uint8_t meshcoreBandwidth;
+extern uint32_t meshtasticFrequencyHz;
+extern uint8_t meshtasticBandwidth;
 
-// Forward declaration for test message function
+// Forward declarations
 void sendTestMessage(uint8_t protocol);
+void setProtocol(ProtocolState protocol);
+void configureForMeshCore();
+void configureForMeshtastic();
 
 USBComm usbComm;
 
@@ -89,20 +98,26 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             
         case CMD_SET_FREQUENCY:
             if (len == 4) {
-                uint32_t freq = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | 
-                               ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
                 // Frequency change would require reconfiguration - for future implementation
-                char msg[50];
-                snprintf(msg, sizeof(msg), "Frequency change requested: %lu Hz", freq);
-                sendDebugLog(msg);
+                // Note: freq value decoded but not used yet
+                (void)data; // Suppress unused parameter warning
+                sendDebugLog("Freq change req");
             }
             break;
             
         case CMD_SET_PROTOCOL:
             if (len == 1) {
                 // 0 = MeshCore, 1 = Meshtastic
-                // Protocol switching is automatic, but could be forced here
-                sendDebugLog("Protocol switching is automatic");
+                uint8_t protocol = data[0];
+                if (protocol == 0) {
+                    setProtocol(LISTENING_MESHCORE);
+                    sendDebugLog("Set to MC");
+                } else if (protocol == 1) {
+                    setProtocol(LISTENING_MESHTASTIC);
+                    sendDebugLog("Set to MT");
+                } else {
+                    sendDebugLog("ERR: Bad proto");
+                }
             }
             break;
             
@@ -112,7 +127,7 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             meshcoreTxCount = 0;
             meshtasticTxCount = 0;
             conversionErrors = 0;
-            sendDebugLog("Statistics reset - all counters cleared");
+            sendDebugLog("Stats reset");
             break;
             
         case CMD_SEND_TEST:
@@ -125,6 +140,83 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
                 if (protocol == 1 || protocol == 2) {
                     delay(200); // Small delay between transmissions
                     sendTestMessage(1); // Meshtastic
+                }
+            }
+            break;
+            
+        case CMD_SET_SWITCH_INTERVAL:
+            if (len == 2) {
+                // 2 bytes: low byte, high byte (little-endian)
+                uint16_t newInterval = data[0] | (data[1] << 8);
+                // Validate range (0 = disabled/off)
+                if (newInterval == 0) {
+                    protocolSwitchIntervalMs = 0;
+                    autoSwitchEnabled = false;
+                    sendDebugLog("Manual mode");
+                } else if (newInterval >= PROTOCOL_SWITCH_INTERVAL_MS_MIN && 
+                           newInterval <= PROTOCOL_SWITCH_INTERVAL_MS_MAX) {
+                    protocolSwitchIntervalMs = newInterval;
+                    autoSwitchEnabled = true;
+                    char msg[50];
+                    snprintf(msg, sizeof(msg), "Switch interval set to %d ms", newInterval);
+                    sendDebugLog(msg);
+                } else {
+                    char msg[60];
+                    snprintf(msg, sizeof(msg), "Invalid interval: %d (range: 0 or %d-%d ms)", 
+                             newInterval, PROTOCOL_SWITCH_INTERVAL_MS_MIN, PROTOCOL_SWITCH_INTERVAL_MS_MAX);
+                    sendDebugLog(msg);
+                }
+            }
+            break;
+            
+        case CMD_SET_MESHCORE_PARAMS:
+            if (len == 5) {
+                // 4 bytes frequency (little-endian) + 1 byte bandwidth
+                uint32_t newFreq = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+                uint8_t newBw = data[4];
+                // Validate frequency (915 MHz ISM band: 902-928 MHz)
+                if (newFreq >= 902000000 && newFreq <= 928000000) {
+                    meshcoreFrequencyHz = newFreq;
+                    sendDebugLog("MeshCore freq updated");
+                } else {
+                    sendDebugLog("ERR: Invalid MeshCore freq");
+                }
+                // Validate bandwidth (0-9: 7.8kHz to 500kHz)
+                if (newBw <= 9) {
+                    meshcoreBandwidth = newBw;
+                    sendDebugLog("MeshCore BW updated");
+                } else {
+                    sendDebugLog("ERR: Invalid MeshCore BW");
+                }
+                // Reconfigure if currently listening to MeshCore
+                if (currentProtocol == LISTENING_MESHCORE) {
+                    configureForMeshCore();
+                }
+            }
+            break;
+            
+        case CMD_SET_MESHTASTIC_PARAMS:
+            if (len == 5) {
+                // 4 bytes frequency (little-endian) + 1 byte bandwidth
+                uint32_t newFreq = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+                uint8_t newBw = data[4];
+                // Validate frequency (915 MHz ISM band: 902-928 MHz)
+                if (newFreq >= 902000000 && newFreq <= 928000000) {
+                    meshtasticFrequencyHz = newFreq;
+                    sendDebugLog("Meshtastic freq updated");
+                } else {
+                    sendDebugLog("ERR: Invalid Meshtastic freq");
+                }
+                // Validate bandwidth (0-9: 7.8kHz to 500kHz)
+                if (newBw <= 9) {
+                    meshtasticBandwidth = newBw;
+                    sendDebugLog("Meshtastic BW updated");
+                } else {
+                    sendDebugLog("ERR: Invalid Meshtastic BW");
+                }
+                // Reconfigure if currently listening to Meshtastic
+                if (currentProtocol == LISTENING_MESHTASTIC) {
+                    configureForMeshtastic();
                 }
             }
             break;
@@ -152,21 +244,27 @@ void USBComm::sendResponse(uint8_t respId, uint8_t* data, uint8_t len) {
 }
 
 void USBComm::sendInfo() {
-    uint8_t info[12];
+    uint8_t info[17];
     info[0] = 0x01; // Firmware version major
     info[1] = 0x00; // Firmware version minor
-    info[2] = (uint8_t)(DEFAULT_FREQUENCY_HZ & 0xFF);
-    info[3] = (uint8_t)((DEFAULT_FREQUENCY_HZ >> 8) & 0xFF);
-    info[4] = (uint8_t)((DEFAULT_FREQUENCY_HZ >> 16) & 0xFF);
-    info[5] = (uint8_t)((DEFAULT_FREQUENCY_HZ >> 24) & 0xFF);
-    info[6] = (uint8_t)(MESHTASTIC_FREQUENCY_HZ & 0xFF);
-    info[7] = (uint8_t)((MESHTASTIC_FREQUENCY_HZ >> 8) & 0xFF);
-    info[8] = (uint8_t)((MESHTASTIC_FREQUENCY_HZ >> 16) & 0xFF);
-    info[9] = (uint8_t)((MESHTASTIC_FREQUENCY_HZ >> 24) & 0xFF);
-    info[10] = PROTOCOL_SWITCH_INTERVAL_MS;
-    info[11] = currentProtocol; // 0 = MeshCore, 1 = Meshtastic
+    info[2] = (uint8_t)(meshcoreFrequencyHz & 0xFF);
+    info[3] = (uint8_t)((meshcoreFrequencyHz >> 8) & 0xFF);
+    info[4] = (uint8_t)((meshcoreFrequencyHz >> 16) & 0xFF);
+    info[5] = (uint8_t)((meshcoreFrequencyHz >> 24) & 0xFF);
+    info[6] = (uint8_t)(meshtasticFrequencyHz & 0xFF);
+    info[7] = (uint8_t)((meshtasticFrequencyHz >> 8) & 0xFF);
+    info[8] = (uint8_t)((meshtasticFrequencyHz >> 16) & 0xFF);
+    info[9] = (uint8_t)((meshtasticFrequencyHz >> 24) & 0xFF);
+    info[10] = (uint8_t)(protocolSwitchIntervalMs & 0xFF);        // Switch interval low byte
+    info[11] = (uint8_t)((protocolSwitchIntervalMs >> 8) & 0xFF); // Switch interval high byte
+    info[12] = currentProtocol; // 0 = MeshCore, 1 = Meshtastic
+    info[13] = meshcoreBandwidth;
+    info[14] = meshtasticBandwidth;
+    // Reserve bytes 15-16 for future use
+    info[15] = 0;
+    info[16] = 0;
     
-    sendResponse(RESP_INFO_REPLY, info, 12);
+    sendResponse(RESP_INFO_REPLY, info, 17);
 }
 
 void USBComm::sendStats() {
@@ -230,4 +328,14 @@ void USBComm::sendDebugLog(const char* message) {
     uint8_t len = strlen(message);
     if (len > 64) len = 64;
     sendResponse(RESP_DEBUG_LOG, (uint8_t*)message, len);
+}
+
+void USBComm::sendError(const char* errorMessage) {
+    // Error messages are higher priority - try to send even if buffer is getting full
+    if (Serial.availableForWrite() < 20) {
+        return; // Only skip if buffer is very full
+    }
+    uint8_t len = strlen(errorMessage);
+    if (len > 60) len = 60; // Slightly shorter than debug log to ensure delivery
+    sendResponse(RESP_ERROR, (uint8_t*)errorMessage, len);
 }

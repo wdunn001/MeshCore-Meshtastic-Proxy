@@ -41,7 +41,9 @@
 #define MAX_MESHTASTIC_PAYLOAD_SIZE 237
 
 // Time-slicing Configuration
-#define PROTOCOL_SWITCH_INTERVAL_MS 100  // Switch between protocols every 100ms
+#define PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT 100  // Default: Switch between protocols every 100ms
+#define PROTOCOL_SWITCH_INTERVAL_MS_MIN 50       // Minimum: 50ms
+#define PROTOCOL_SWITCH_INTERVAL_MS_MAX 1000     // Maximum: 1000ms (1 second)
 
 // Serial Configuration
 #define SERIAL_BAUD 115200

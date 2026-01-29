@@ -8,6 +8,9 @@ const Protocol = {
     CMD_SET_PROTOCOL: 0x04,
     CMD_RESET_STATS: 0x05,
     CMD_SEND_TEST: 0x06,
+    CMD_SET_SWITCH_INTERVAL: 0x07,
+    CMD_SET_MESHCORE_PARAMS: 0x08,
+    CMD_SET_MESHTASTIC_PARAMS: 0x09,
 
     // Response IDs
     RESP_INFO_REPLY: 0x81,
@@ -27,14 +30,16 @@ const Protocol = {
 
     // Decode INFO_REPLY response
     decodeInfoReply(data) {
-        if (data.length < 12) return null;
+        if (data.length < 17) return null; // Updated to 17 bytes
         return {
             fwVersionMajor: data[0],
             fwVersionMinor: data[1],
             meshcoreFreq: data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24),
             meshtasticFreq: data[6] | (data[7] << 8) | (data[8] << 16) | (data[9] << 24),
-            switchInterval: data[10],
-            currentProtocol: data[11] // 0 = MeshCore, 1 = Meshtastic
+            switchInterval: data[10] | (data[11] << 8), // 16-bit value (little-endian)
+            currentProtocol: data[12], // 0 = MeshCore, 1 = Meshtastic
+            meshcoreBandwidth: data[13],
+            meshtasticBandwidth: data[14]
         };
     },
 
@@ -80,6 +85,19 @@ const Protocol = {
     decodeDebugLog(data) {
         const decoder = new TextDecoder();
         return decoder.decode(data);
+    },
+
+    // Decode ERROR response (same format as DEBUG_LOG - text message)
+    decodeError(data) {
+        if (!data || data.length === 0) {
+            return ''; // Empty error message
+        }
+        try {
+            const decoder = new TextDecoder();
+            return decoder.decode(data);
+        } catch (e) {
+            return 'Error decoding error message';
+        }
     }
 };
 

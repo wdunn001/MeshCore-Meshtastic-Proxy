@@ -24,7 +24,6 @@ bool meshcore_parsePacket(const uint8_t* data, uint8_t len, MeshCorePacket* pack
     
     // Read header byte
     packet->header = data[i++];
-    uint8_t routeType = packet->header & PH_ROUTE_MASK;
     
     // Read transport codes if present
     if (meshcore_hasTransportCodes(packet->header)) {

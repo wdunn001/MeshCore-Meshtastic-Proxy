@@ -15,8 +15,17 @@ enum ProtocolState {
 // Global state variables (accessible from usb_comm.cpp)
 ProtocolState currentProtocol = LISTENING_MESHCORE;
 unsigned long lastProtocolSwitch = 0;
+uint16_t protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT; // Configurable switch interval
+bool autoSwitchEnabled = true; // Enable/disable automatic protocol switching
 
-// Packet buffers
+// Configurable LoRa parameters
+uint32_t meshcoreFrequencyHz = DEFAULT_FREQUENCY_HZ;
+uint8_t meshcoreBandwidth = MESHCORE_BW;
+uint32_t meshtasticFrequencyHz = MESHTASTIC_FREQUENCY_HZ;
+uint8_t meshtasticBandwidth = MESHTASTIC_BW;
+
+// Packet buffers - use single shared buffer to save RAM
+// Since we only process one packet at a time, we can reuse buffers
 uint8_t rxBuffer[MAX_MESHCORE_PACKET_SIZE];
 uint8_t txBuffer[MAX_MESHTASTIC_PACKET_SIZE];
 uint8_t convertedBuffer[MAX_MESHCORE_PACKET_SIZE];
@@ -30,14 +39,18 @@ uint32_t meshtasticTxCount = 0;
 uint32_t conversionErrors = 0;
 
 // Helper to safely increment counters with overflow protection
+// Cap at max safe value to prevent wraparound to negative when interpreted as signed
 #define SAFE_INCREMENT(counter) do { \
-    if (counter < 4294967295U) counter++; \
-    else { \
-        /* Overflow protection - log and reset */ \
-        char msg[50]; \
-        snprintf(msg, sizeof(msg), "Counter overflow detected!"); \
-        usbComm.sendDebugLog(msg); \
-        counter = 0; \
+    if (counter < 2147483647U) { \
+        counter++; \
+    } else { \
+        /* Overflow protection - cap at max safe value (2^31 - 1) */ \
+        counter = 2147483647U; \
+        static bool overflowLogged = false; \
+        if (!overflowLogged) { \
+            usbComm.sendDebugLog("ERR: Counter overflow - capped at max"); \
+            overflowLogged = true; \
+        } \
     } \
 } while(0)
 
@@ -51,8 +64,8 @@ void onPacketReceived() {
 void configureForMeshCore() {
     sx1276_setMode(MODE_STDBY);
     delay(10);
-    sx1276_setFrequency(DEFAULT_FREQUENCY_HZ);
-    sx1276_setBandwidth(MESHCORE_BW);
+    sx1276_setFrequency(meshcoreFrequencyHz);
+    sx1276_setBandwidth(meshcoreBandwidth);
     sx1276_setSpreadingFactor(MESHCORE_SF);
     sx1276_setCodingRate(MESHCORE_CR);
     sx1276_setSyncWord(MESHCORE_SYNC_WORD);
@@ -67,8 +80,8 @@ void configureForMeshCore() {
 void configureForMeshtastic() {
     sx1276_setMode(MODE_STDBY);
     delay(10);
-    sx1276_setFrequency(MESHTASTIC_FREQUENCY_HZ);
-    sx1276_setBandwidth(MESHTASTIC_BW);
+    sx1276_setFrequency(meshtasticFrequencyHz);
+    sx1276_setBandwidth(meshtasticBandwidth);
     sx1276_setSpreadingFactor(MESHTASTIC_SF);
     sx1276_setCodingRate(MESHTASTIC_CR);
     sx1276_setSyncWord(MESHTASTIC_SYNC_WORD);
@@ -152,6 +165,7 @@ bool transmitPacket(const uint8_t* data, uint8_t len) {
             // Timeout - return to standby
             sx1276_setMode(MODE_STDBY);
             delay(10);
+            // Don't send error here - this function is called frequently and errors would spam
             return false;
         }
         delay(1); // Small delay in loop
@@ -171,21 +185,13 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
     MeshCorePacket meshcorePacket;
     if (!meshcore_parsePacket(data, len, &meshcorePacket)) {
         SAFE_INCREMENT(conversionErrors);
-        // Debug: log packet details on parse failure
-        char debugMsg[100];
+        // Send concise error message to save RAM
         if (len > 0) {
-            uint8_t header = data[0];
-            uint8_t routeType = header & 0x03;
-            uint8_t payloadType = (header >> 2) & 0x0F;
-            uint8_t version = (header >> 6) & 0x03;
-            uint8_t pathLenPos = 1;
-            if (routeType == 0x00 || routeType == 0x03) {
-                pathLenPos = 5; // Has transport codes
-            }
-            uint8_t pathLen = (pathLenPos < len) ? data[pathLenPos] : 0;
-            snprintf(debugMsg, sizeof(debugMsg), "MeshCore parse fail: len=%d hdr=0x%02X rt=%d pt=%d v=%d plen=%d (max=%d)", 
-                     len, header, routeType, payloadType, version, pathLen, MAX_MESHCORE_PATH_SIZE);
-            usbComm.sendDebugLog(debugMsg);
+            char errorMsg[40];
+            snprintf(errorMsg, sizeof(errorMsg), "ERR: MC parse fail len=%d", len);
+            usbComm.sendDebugLog(errorMsg);
+        } else {
+            usbComm.sendDebugLog("ERR: MC empty");
         }
         return;
     }
@@ -194,6 +200,7 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
     uint8_t convertedLen = 0;
     if (!meshcore_convertToMeshtastic(&meshcorePacket, txBuffer, &convertedLen)) {
         SAFE_INCREMENT(conversionErrors);
+        usbComm.sendDebugLog("ERR: MC->MT conv fail");
         return;
     }
     
@@ -207,6 +214,8 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
         digitalWrite(LED_PIN, HIGH);
         delay(10);
         digitalWrite(LED_PIN, LOW);
+    } else {
+        usbComm.sendDebugLog("ERR: MT TX fail");
     }
     
     // Switch back to MeshCore listening
@@ -217,11 +226,15 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
     SAFE_INCREMENT(meshtasticRxCount);
     
     MeshtasticHeader header;
-    uint8_t payload[MAX_MESHTASTIC_PAYLOAD_SIZE];
+    // Reuse convertedBuffer for payload parsing to save RAM (we'll copy to txBuffer before conversion)
+    uint8_t* payload = convertedBuffer; // Reuse buffer - will be overwritten during conversion
     uint8_t payloadLen = 0;
     
     if (!meshtastic_parsePacket(data, len, &header, payload, &payloadLen)) {
         SAFE_INCREMENT(conversionErrors);
+        char errorMsg[30];
+        snprintf(errorMsg, sizeof(errorMsg), "ERR: MT parse len=%d", len);
+        usbComm.sendDebugLog(errorMsg);
         return;
     }
     
@@ -229,6 +242,7 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
     uint8_t convertedLen = 0;
     if (!meshtastic_convertToMeshCore(&header, payload, payloadLen, convertedBuffer, &convertedLen)) {
         SAFE_INCREMENT(conversionErrors);
+        usbComm.sendDebugLog("ERR: MT->MC conv fail");
         return;
     }
     
@@ -242,6 +256,8 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
         digitalWrite(LED_PIN, HIGH);
         delay(10);
         digitalWrite(LED_PIN, LOW);
+    } else {
+        usbComm.sendDebugLog("ERR: MC TX fail");
     }
     
     // Switch back to Meshtastic listening
@@ -249,9 +265,14 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
 }
 
 void switchProtocol() {
+    // Only auto-switch if enabled and interval is not 0
+    if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
+        return;
+    }
+    
     unsigned long currentTime = millis();
     
-    if (currentTime - lastProtocolSwitch >= PROTOCOL_SWITCH_INTERVAL_MS) {
+    if (currentTime - lastProtocolSwitch >= protocolSwitchIntervalMs) {
         if (currentProtocol == LISTENING_MESHCORE) {
             currentProtocol = LISTENING_MESHTASTIC;
             configureForMeshtastic();
@@ -261,6 +282,17 @@ void switchProtocol() {
         }
         lastProtocolSwitch = currentTime;
     }
+}
+
+void setProtocol(ProtocolState protocol) {
+    if (protocol == LISTENING_MESHCORE) {
+        currentProtocol = LISTENING_MESHCORE;
+        configureForMeshCore();
+    } else {
+        currentProtocol = LISTENING_MESHTASTIC;
+        configureForMeshtastic();
+    }
+    lastProtocolSwitch = millis();
 }
 
 void printStatistics() {
@@ -334,8 +366,8 @@ void sendTestMessage(uint8_t protocol) {
         // Configure radio for MeshCore
         sx1276_setMode(MODE_STDBY);
         delay(20);
-        sx1276_setFrequency(DEFAULT_FREQUENCY_HZ);
-        sx1276_setBandwidth(MESHCORE_BW);
+        sx1276_setFrequency(meshcoreFrequencyHz);
+        sx1276_setBandwidth(meshcoreBandwidth);
         sx1276_setSpreadingFactor(MESHCORE_SF);
         sx1276_setCodingRate(MESHCORE_CR);
         sx1276_setSyncWord(MESHCORE_SYNC_WORD);
@@ -345,7 +377,7 @@ void sendTestMessage(uint8_t protocol) {
         sx1276_setCrc(true); // Enable CRC
         delay(20);
         
-        snprintf(debugMsg, sizeof(debugMsg), "TX MeshCore: %d bytes @ %.3f MHz", testLen, DEFAULT_FREQUENCY_HZ / 1000000.0);
+        snprintf(debugMsg, sizeof(debugMsg), "TX MeshCore: %d bytes @ %.3f MHz", testLen, meshcoreFrequencyHz / 1000000.0);
         usbComm.sendDebugLog(debugMsg);
         
         // Verify radio is configured correctly before TX
@@ -374,8 +406,8 @@ void sendTestMessage(uint8_t protocol) {
         // Configure radio for Meshtastic
         sx1276_setMode(MODE_STDBY);
         delay(20);
-        sx1276_setFrequency(MESHTASTIC_FREQUENCY_HZ);
-        sx1276_setBandwidth(MESHTASTIC_BW);
+        sx1276_setFrequency(meshtasticFrequencyHz);
+        sx1276_setBandwidth(meshtasticBandwidth);
         sx1276_setSpreadingFactor(MESHTASTIC_SF);
         sx1276_setCodingRate(MESHTASTIC_CR);
         sx1276_setSyncWord(MESHTASTIC_SYNC_WORD);
@@ -385,7 +417,7 @@ void sendTestMessage(uint8_t protocol) {
         sx1276_setCrc(true); // Enable CRC
         delay(20);
         
-        snprintf(debugMsg, sizeof(debugMsg), "TX Meshtastic: %d bytes @ %.3f MHz", testLen, MESHTASTIC_FREQUENCY_HZ / 1000000.0);
+        snprintf(debugMsg, sizeof(debugMsg), "TX Meshtastic: %d bytes @ %.3f MHz", testLen, meshtasticFrequencyHz / 1000000.0);
         usbComm.sendDebugLog(debugMsg);
         
         // Verify radio is configured correctly before TX
@@ -427,6 +459,7 @@ void setup() {
     // Initialize SX1276
     if (!sx1276_init()) {
         Serial.println("ERROR: SX1276 initialization failed!");
+        usbComm.sendDebugLog("ERR: SX1276 init failed - check SPI connections");
         while(1) {
             digitalWrite(LED_PIN, HIGH);
             delay(100);
@@ -439,6 +472,14 @@ void setup() {
     
     // Attach interrupt
     sx1276_attachInterrupt(onPacketReceived);
+    
+    // Initialize configurable parameters
+    meshcoreFrequencyHz = DEFAULT_FREQUENCY_HZ;
+    meshcoreBandwidth = MESHCORE_BW;
+    meshtasticFrequencyHz = MESHTASTIC_FREQUENCY_HZ;
+    meshtasticBandwidth = MESHTASTIC_BW;
+    protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
+    autoSwitchEnabled = true;
     
     // Start listening for MeshCore packets
     configureForMeshCore();

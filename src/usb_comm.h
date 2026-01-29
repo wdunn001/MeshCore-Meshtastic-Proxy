@@ -11,6 +11,9 @@
 #define CMD_SET_PROTOCOL  0x04
 #define CMD_RESET_STATS   0x05
 #define CMD_SEND_TEST     0x06
+#define CMD_SET_SWITCH_INTERVAL 0x07
+#define CMD_SET_MESHCORE_PARAMS 0x08
+#define CMD_SET_MESHTASTIC_PARAMS 0x09
 
 // Response IDs
 #define RESP_INFO_REPLY   0x81
@@ -27,6 +30,7 @@ public:
     void sendStats();
     void sendRxPacket(uint8_t protocol, int16_t rssi, int8_t snr, uint8_t* data, uint8_t len);
     void sendDebugLog(const char* message);
+    void sendError(const char* errorMessage);
     
 private:
     void handleCommand(uint8_t cmd, uint8_t* data, uint8_t len);

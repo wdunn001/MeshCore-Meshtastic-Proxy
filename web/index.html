@@ -11,9 +11,16 @@
         <!-- Header -->
         <header class="app-header">
             <h1>MeshCore-Meshtastic Proxy</h1>
-            <div class="connection-status" id="connectionStatus">
-                <span class="status-indicator disconnected"></span>
-                <span id="statusText">Disconnected</span>
+            <div class="header-controls">
+                <div class="connection-status" id="connectionStatus">
+                    <span class="status-indicator disconnected"></span>
+                    <span id="statusText">Disconnected</span>
+                </div>
+                <div class="header-buttons">
+                    <button id="connectBtn" class="btn btn-primary btn-sm">Connect</button>
+                    <button id="disconnectBtn" class="btn btn-secondary btn-sm" disabled>Disconnect</button>
+                    <button id="resetStatsBtn" class="btn btn-secondary btn-sm" disabled>Reset Stats</button>
+                </div>
             </div>
         </header>
 
@@ -21,7 +28,9 @@
         <main class="main-content">
             <!-- Statistics Panel -->
             <section class="panel">
-                <h2>Statistics</h2>
+                <div class="panel-header">
+                    <h2>Statistics</h2>
+                </div>
                 <div class="stats-grid">
                     <div class="stat-item meshcore">
                         <label>MeshCore RX</label>
@@ -53,12 +62,38 @@
 
             <!-- Protocol Status Panel -->
             <section class="panel">
-                <h2>Protocol Status</h2>
+                <div class="panel-header-with-action">
+                    <h2>Protocol Status</h2>
+                    <button id="testBothBtn" class="btn btn-test btn-icon" disabled title="Transmit test message on both MeshCore and Meshtastic protocols">
+                        <span class="tx-icon">TX</span> All
+                    </button>
+                </div>
                 <div class="protocol-status">
                     <div class="protocol-indicator" id="meshcoreIndicator">
                         <div class="protocol-header">
                             <h3>MeshCore</h3>
                             <span class="status-badge" id="meshcoreStatusBadge">Inactive</span>
+                        </div>
+                        <div class="protocol-config">
+                            <div class="config-item">
+                                <label>Freq (MHz):</label>
+                                <input type="number" id="meshcoreFreqInput" class="config-input" step="0.001" min="902" max="928" value="910.525" disabled>
+                            </div>
+                            <div class="config-item">
+                                <label>BW:</label>
+                                <select id="meshcoreBwSelect" class="config-select" disabled>
+                                    <option value="0">7.8 kHz</option>
+                                    <option value="1">10.4 kHz</option>
+                                    <option value="2">15.6 kHz</option>
+                                    <option value="3">20.8 kHz</option>
+                                    <option value="4">31.25 kHz</option>
+                                    <option value="5">41.7 kHz</option>
+                                    <option value="6" selected>62.5 kHz</option>
+                                    <option value="7">125 kHz</option>
+                                    <option value="8">250 kHz</option>
+                                    <option value="9">500 kHz</option>
+                                </select>
+                            </div>
                         </div>
                         <div class="frequency" id="meshcoreFreq">910.525 MHz</div>
                         <div class="protocol-details">
@@ -71,11 +106,37 @@
                                 <span class="detail-value" id="meshcoreListening">No</span>
                             </div>
                         </div>
+                        <div class="protocol-actions">
+                            <button id="testMeshCoreBtn" class="btn btn-test btn-icon btn-small" disabled title="Transmit test message on MeshCore protocol">
+                                <span class="tx-icon">TX</span>
+                            </button>
+                        </div>
                     </div>
                     <div class="protocol-indicator" id="meshtasticIndicator">
                         <div class="protocol-header">
                             <h3>Meshtastic</h3>
                             <span class="status-badge" id="meshtasticStatusBadge">Inactive</span>
+                        </div>
+                        <div class="protocol-config">
+                            <div class="config-item">
+                                <label>Freq (MHz):</label>
+                                <input type="number" id="meshtasticFreqInput" class="config-input" step="0.001" min="902" max="928" value="906.875" disabled>
+                            </div>
+                            <div class="config-item">
+                                <label>BW:</label>
+                                <select id="meshtasticBwSelect" class="config-select" disabled>
+                                    <option value="0">7.8 kHz</option>
+                                    <option value="1">10.4 kHz</option>
+                                    <option value="2">15.6 kHz</option>
+                                    <option value="3">20.8 kHz</option>
+                                    <option value="4">31.25 kHz</option>
+                                    <option value="5">41.7 kHz</option>
+                                    <option value="6">62.5 kHz</option>
+                                    <option value="7">125 kHz</option>
+                                    <option value="8" selected>250 kHz</option>
+                                    <option value="9">500 kHz</option>
+                                </select>
+                            </div>
                         </div>
                         <div class="frequency" id="meshtasticFreq">906.875 MHz</div>
                         <div class="protocol-details">
@@ -88,13 +149,20 @@
                                 <span class="detail-value" id="meshtasticListening">No</span>
                             </div>
                         </div>
+                        <div class="protocol-actions">
+                            <button id="testMeshtasticBtn" class="btn btn-test btn-icon btn-small" disabled title="Transmit test message on Meshtastic protocol">
+                                <span class="tx-icon">TX</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
 
             <!-- Device Status Panel -->
             <section class="panel">
-                <h2>Device Status</h2>
+                <div class="panel-header">
+                    <h2>Device Status</h2>
+                </div>
                 <div class="device-status-grid">
                     <div class="status-item">
                         <label>Current Activity</label>
@@ -117,15 +185,44 @@
 
             <!-- Control Panel -->
             <section class="panel">
-                <h2>Control</h2>
-                <div class="control-buttons">
-                    <button id="connectBtn" class="btn btn-primary">Connect Proxy</button>
-                    <button id="disconnectBtn" class="btn btn-secondary" disabled>Disconnect</button>
-                    <button id="resetStatsBtn" class="btn btn-secondary" disabled>Reset Statistics</button>
-                    <button id="testMeshCoreBtn" class="btn btn-test" disabled>Test MeshCore TX</button>
-                    <button id="testMeshtasticBtn" class="btn btn-test" disabled>Test Meshtastic TX</button>
-                    <button id="testBothBtn" class="btn btn-test" disabled>Test Both TX</button>
+                <div class="panel-header">
+                    <h2>Control</h2>
                 </div>
+                <form id="controlForm" class="control-form">
+                    <div class="form-group">
+                        <label for="protocolSelect">Protocol Mode</label>
+                        <div class="form-row">
+                            <select id="protocolSelect" class="form-select" disabled>
+                                <option value="0">MeshCore</option>
+                                <option value="1">Meshtastic</option>
+                                <option value="2">Auto-Switch</option>
+                            </select>
+                            <span id="protocolDisplay" class="form-display">Current: Auto-Switch</span>
+                        </div>
+                        <div class="form-help">Select protocol or enable auto-switching</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="switchIntervalSelect">Switch Interval</label>
+                        <div class="form-row">
+                            <select id="switchIntervalSelect" class="form-select" disabled>
+                                <option value="0">Off (Manual)</option>
+                                <option value="50">50ms (Fast)</option>
+                                <option value="100" selected>100ms (Default)</option>
+                                <option value="200">200ms</option>
+                                <option value="500">500ms</option>
+                                <option value="1000">1000ms (Slow)</option>
+                            </select>
+                            <span id="switchIntervalDisplay" class="form-display">Current: 100ms</span>
+                        </div>
+                        <div class="form-help">Set to "Off" for manual protocol control</div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" id="saveSettingsBtn" class="btn btn-primary" disabled>Save Settings</button>
+                    </div>
+                </form>
+
             </section>
 
             <!-- Last Packet Panel -->
@@ -138,7 +235,9 @@
 
             <!-- Event Log Panel -->
             <section class="panel">
-                <h2>Event Log</h2>
+                <div class="panel-header">
+                    <h2>Event Log</h2>
+                </div>
                 <div class="event-log" id="eventLog">
                     <div class="log-entry info">Ready to connect...</div>
                 </div>
