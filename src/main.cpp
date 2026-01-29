@@ -37,6 +37,7 @@ uint32_t meshtasticRxCount = 0;
 uint32_t meshcoreTxCount = 0;
 uint32_t meshtasticTxCount = 0;
 uint32_t conversionErrors = 0;
+uint32_t parseErrors = 0; // Separate counter for parse failures
 
 // Helper to safely increment counters with overflow protection
 // Cap at max safe value to prevent wraparound to negative when interpreted as signed
@@ -184,7 +185,7 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
     
     MeshCorePacket meshcorePacket;
     if (!meshcore_parsePacket(data, len, &meshcorePacket)) {
-        SAFE_INCREMENT(conversionErrors);
+        SAFE_INCREMENT(parseErrors);
         // Send concise error message to save RAM
         if (len > 0) {
             char errorMsg[40];
@@ -231,9 +232,13 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
     uint8_t payloadLen = 0;
     
     if (!meshtastic_parsePacket(data, len, &header, payload, &payloadLen)) {
-        SAFE_INCREMENT(conversionErrors);
-        char errorMsg[30];
-        snprintf(errorMsg, sizeof(errorMsg), "ERR: MT parse len=%d", len);
+        SAFE_INCREMENT(parseErrors);
+        char errorMsg[40];
+        if (len < MESHTASTIC_HEADER_SIZE) {
+            snprintf(errorMsg, sizeof(errorMsg), "ERR: MT too short %d<%d", len, MESHTASTIC_HEADER_SIZE);
+        } else {
+            snprintf(errorMsg, sizeof(errorMsg), "ERR: MT parse fail len=%d", len);
+        }
         usbComm.sendDebugLog(errorMsg);
         return;
     }

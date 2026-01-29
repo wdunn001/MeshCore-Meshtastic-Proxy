@@ -9,6 +9,7 @@ extern uint32_t meshtasticRxCount;
 extern uint32_t meshcoreTxCount;
 extern uint32_t meshtasticTxCount;
 extern uint32_t conversionErrors;
+extern uint32_t parseErrors;
 
 // Protocol state enum (must match main.cpp)
 enum ProtocolState {
@@ -127,6 +128,7 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             meshcoreTxCount = 0;
             meshtasticTxCount = 0;
             conversionErrors = 0;
+            parseErrors = 0;
             sendDebugLog("Stats reset");
             break;
             
@@ -268,7 +270,7 @@ void USBComm::sendInfo() {
 }
 
 void USBComm::sendStats() {
-    uint8_t stats[20];
+    uint8_t stats[24];
     
     // MeshCore RX count (4 bytes)
     stats[0] = (uint8_t)(meshcoreRxCount & 0xFF);
@@ -299,8 +301,13 @@ void USBComm::sendStats() {
     stats[17] = (uint8_t)((conversionErrors >> 8) & 0xFF);
     stats[18] = (uint8_t)((conversionErrors >> 16) & 0xFF);
     stats[19] = (uint8_t)((conversionErrors >> 24) & 0xFF);
+    // Parse errors (4 bytes)
+    stats[20] = (uint8_t)(parseErrors & 0xFF);
+    stats[21] = (uint8_t)((parseErrors >> 8) & 0xFF);
+    stats[22] = (uint8_t)((parseErrors >> 16) & 0xFF);
+    stats[23] = (uint8_t)((parseErrors >> 24) & 0xFF);
     
-    sendResponse(RESP_STATS, stats, 20);
+    sendResponse(RESP_STATS, stats, 24);
 }
 
 void USBComm::sendRxPacket(uint8_t protocol, int16_t rssi, int8_t snr, uint8_t* data, uint8_t len) {
