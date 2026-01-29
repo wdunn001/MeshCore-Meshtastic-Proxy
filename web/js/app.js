@@ -268,7 +268,12 @@ class App {
                 break;
                 
             case window.Protocol.RESP_ERROR:
-                window.UI.addLogEntry('Error from device', 'error');
+                const errorMsg = window.Protocol.decodeError(data);
+                if (errorMsg) {
+                    window.UI.addLogEntry(`Device Error: ${errorMsg}`, 'error');
+                } else {
+                    window.UI.addLogEntry('Error from device (no details)', 'error');
+                }
                 break;
         }
     }

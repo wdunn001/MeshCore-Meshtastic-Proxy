@@ -68,6 +68,9 @@ bool sx1276_init() {
     sx1276_setHeaderMode(true); // Implicit header mode
     sx1276_setSyncWord(MESHCORE_SYNC_WORD);
     
+    // Set IQ inversion - MeshCore uses normal IQ, Meshtastic uses inverted IQ
+    sx1276_setInvertIQ(false); // Default to normal IQ for MeshCore
+    
     // Configure FIFO addresses
     sx1276_writeReg(REG_FIFO_TX_BASE_ADDR, 0x00);
     sx1276_writeReg(REG_FIFO_RX_BASE_ADDR, 0x00);

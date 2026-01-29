@@ -209,6 +209,15 @@ body {
     font-weight: 600;
 }
 
+.stat-unit {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 4px;
+    opacity: 0.8;
+}
+
 .stat-item.meshcore {
     border-left: 4px solid #4a90e2;
 }

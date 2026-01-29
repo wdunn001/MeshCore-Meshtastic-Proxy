@@ -22,11 +22,24 @@ uint8_t txBuffer[MAX_MESHTASTIC_PACKET_SIZE];
 uint8_t convertedBuffer[MAX_MESHCORE_PACKET_SIZE];
 
 // Statistics
+// Using uint32_t (max 4,294,967,295) - add overflow protection
 uint32_t meshcoreRxCount = 0;
 uint32_t meshtasticRxCount = 0;
 uint32_t meshcoreTxCount = 0;
 uint32_t meshtasticTxCount = 0;
 uint32_t conversionErrors = 0;
+
+// Helper to safely increment counters with overflow protection
+#define SAFE_INCREMENT(counter) do { \
+    if (counter < 4294967295U) counter++; \
+    else { \
+        /* Overflow protection - log and reset */ \
+        char msg[50]; \
+        snprintf(msg, sizeof(msg), "Counter overflow detected!"); \
+        usbComm.sendDebugLog(msg); \
+        counter = 0; \
+    } \
+} while(0)
 
 // Interrupt flag
 volatile bool packetReceived = false;
@@ -45,6 +58,8 @@ void configureForMeshCore() {
     sx1276_setSyncWord(MESHCORE_SYNC_WORD);
     sx1276_setPreambleLength(MESHCORE_PREAMBLE);
     sx1276_setHeaderMode(true); // Implicit header mode
+    sx1276_setInvertIQ(false); // MeshCore uses normal IQ
+    sx1276_setCrc(true); // Enable CRC
     delay(10);
     sx1276_setMode(MODE_RX_CONTINUOUS);
 }
@@ -59,6 +74,8 @@ void configureForMeshtastic() {
     sx1276_setSyncWord(MESHTASTIC_SYNC_WORD);
     sx1276_setPreambleLength(MESHTASTIC_PREAMBLE);
     sx1276_setHeaderMode(true); // Implicit header mode
+    sx1276_setInvertIQ(true); // Meshtastic uses inverted IQ
+    sx1276_setCrc(true); // Enable CRC
     delay(10);
     sx1276_setMode(MODE_RX_CONTINUOUS);
 }
@@ -87,6 +104,10 @@ bool receivePacket(uint8_t* buffer, uint8_t* len) {
 
 bool transmitPacket(const uint8_t* data, uint8_t len) {
     if (len == 0 || len > MAX_MESHTASTIC_PACKET_SIZE) {
+        char errorMsg[60];
+        snprintf(errorMsg, sizeof(errorMsg), "TX error: Invalid packet length %d (max %d)", 
+                 len, MAX_MESHTASTIC_PACKET_SIZE);
+        usbComm.sendError(errorMsg);
         return false;
     }
     
@@ -96,6 +117,9 @@ bool transmitPacket(const uint8_t* data, uint8_t len) {
     
     // Set power to maximum for transmission
     sx1276_setPower(17); // Max power (17 dBm)
+    
+    // Ensure CRC is enabled for transmission
+    sx1276_setCrc(true);
     
     // Write packet to FIFO (this also sets payload length and FIFO pointer)
     sx1276_writeFifo((uint8_t*)data, len);
@@ -116,6 +140,9 @@ bool transmitPacket(const uint8_t* data, uint8_t len) {
         // Failed to enter TX mode
         sx1276_setMode(MODE_STDBY);
         delay(10);
+        char errorMsg[50];
+        snprintf(errorMsg, sizeof(errorMsg), "TX error: Failed to enter TX mode (mode=0x%02X)", opMode);
+        usbComm.sendError(errorMsg);
         return false;
     }
     
@@ -132,6 +159,9 @@ bool transmitPacket(const uint8_t* data, uint8_t len) {
             // Timeout - return to standby
             sx1276_setMode(MODE_STDBY);
             delay(10);
+            char errorMsg[50];
+            snprintf(errorMsg, sizeof(errorMsg), "TX error: Timeout waiting for TX_DONE (len=%d)", len);
+            usbComm.sendError(errorMsg);
             return false;
         }
         delay(1); // Small delay in loop
@@ -146,13 +176,13 @@ bool transmitPacket(const uint8_t* data, uint8_t len) {
 }
 
 void handleMeshCorePacket(uint8_t* data, uint8_t len) {
-    meshcoreRxCount++;
+    SAFE_INCREMENT(meshcoreRxCount);
     
     MeshCorePacket meshcorePacket;
     if (!meshcore_parsePacket(data, len, &meshcorePacket)) {
-        conversionErrors++;
-        // Debug: log packet details on parse failure
-        char debugMsg[100];
+        SAFE_INCREMENT(conversionErrors);
+        // Send descriptive error message
+        char errorMsg[80];
         if (len > 0) {
             uint8_t header = data[0];
             uint8_t routeType = header & 0x03;
@@ -163,9 +193,23 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
                 pathLenPos = 5; // Has transport codes
             }
             uint8_t pathLen = (pathLenPos < len) ? data[pathLenPos] : 0;
-            snprintf(debugMsg, sizeof(debugMsg), "MeshCore parse fail: len=%d hdr=0x%02X rt=%d pt=%d v=%d plen=%d (max=%d)", 
-                     len, header, routeType, payloadType, version, pathLen, MAX_MESHCORE_PATH_SIZE);
+            if (pathLen > MAX_MESHCORE_PATH_SIZE) {
+                snprintf(errorMsg, sizeof(errorMsg), "MeshCore parse error: Invalid path length %d (max %d)", 
+                         pathLen, MAX_MESHCORE_PATH_SIZE);
+            } else if (len < 2) {
+                snprintf(errorMsg, sizeof(errorMsg), "MeshCore parse error: Packet too short (%d bytes)", len);
+            } else {
+                snprintf(errorMsg, sizeof(errorMsg), "MeshCore parse error: Invalid packet format (len=%d hdr=0x%02X)", 
+                         len, header);
+            }
+            usbComm.sendError(errorMsg);
+            // Also send as debug log with more details
+            char debugMsg[100];
+            snprintf(debugMsg, sizeof(debugMsg), "MeshCore parse fail: len=%d hdr=0x%02X rt=%d pt=%d v=%d plen=%d", 
+                     len, header, routeType, payloadType, version, pathLen);
             usbComm.sendDebugLog(debugMsg);
+        } else {
+            usbComm.sendError("MeshCore parse error: Empty packet");
         }
         return;
     }
@@ -173,7 +217,11 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
     // Convert to Meshtastic format
     uint8_t convertedLen = 0;
     if (!meshcore_convertToMeshtastic(&meshcorePacket, txBuffer, &convertedLen)) {
-        conversionErrors++;
+        SAFE_INCREMENT(conversionErrors);
+        char errorMsg[60];
+        snprintf(errorMsg, sizeof(errorMsg), "MeshCore->Meshtastic conversion error: Payload too large (%d bytes)", 
+                 meshcorePacket.payload_len);
+        usbComm.sendError(errorMsg);
         return;
     }
     
@@ -183,7 +231,7 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
     
     // Transmit as Meshtastic packet
     if (transmitPacket(txBuffer, convertedLen)) {
-        meshtasticTxCount++;
+        SAFE_INCREMENT(meshtasticTxCount);
         digitalWrite(LED_PIN, HIGH);
         delay(10);
         digitalWrite(LED_PIN, LOW);
@@ -194,21 +242,33 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
 }
 
 void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
-    meshtasticRxCount++;
+    SAFE_INCREMENT(meshtasticRxCount);
     
     MeshtasticHeader header;
     uint8_t payload[MAX_MESHTASTIC_PAYLOAD_SIZE];
     uint8_t payloadLen = 0;
     
     if (!meshtastic_parsePacket(data, len, &header, payload, &payloadLen)) {
-        conversionErrors++;
+        SAFE_INCREMENT(conversionErrors);
+        char errorMsg[60];
+        if (len < MESHTASTIC_HEADER_SIZE) {
+            snprintf(errorMsg, sizeof(errorMsg), "Meshtastic parse error: Packet too short (%d bytes, need %d)", 
+                     len, MESHTASTIC_HEADER_SIZE);
+        } else {
+            snprintf(errorMsg, sizeof(errorMsg), "Meshtastic parse error: Invalid packet format (%d bytes)", len);
+        }
+        usbComm.sendError(errorMsg);
         return;
     }
     
     // Convert to MeshCore format
     uint8_t convertedLen = 0;
     if (!meshtastic_convertToMeshCore(&header, payload, payloadLen, convertedBuffer, &convertedLen)) {
-        conversionErrors++;
+        SAFE_INCREMENT(conversionErrors);
+        char errorMsg[60];
+        snprintf(errorMsg, sizeof(errorMsg), "Meshtastic->MeshCore conversion error: Payload too large (%d bytes)", 
+                 payloadLen);
+        usbComm.sendError(errorMsg);
         return;
     }
     
@@ -218,7 +278,7 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
     
     // Transmit as MeshCore packet
     if (transmitPacket(convertedBuffer, convertedLen)) {
-        meshcoreTxCount++;
+        SAFE_INCREMENT(meshcoreTxCount);
         digitalWrite(LED_PIN, HIGH);
         delay(10);
         digitalWrite(LED_PIN, LOW);
@@ -286,15 +346,16 @@ uint8_t generateMeshtasticTestPacket(uint8_t* buffer, uint8_t* len) {
     MeshtasticHeader* header = (MeshtasticHeader*)buffer;
     
     // Broadcast header
-    header->to = 0xFFFFFFFF;      // Broadcast
-    header->from = 0x00000001;    // Proxy node ID
-    header->id = 0x00000001;      // Packet ID
-    header->flags = 0x03;         // Hop limit = 3
-    header->channel = 0;          // Default channel
+    header->to = 0xFFFFFFFF;      // Broadcast (little-endian)
+    header->from = 0x00000001;    // Proxy node ID (little-endian)
+    header->id = 0x00000001;      // Packet ID (little-endian)
+    header->flags = 0x03;         // Hop limit = 3, want_ack=0, via_mqtt=0, hop_start=0
+    header->channel = 0;          // Default channel hash (0 for default/primary channel)
     header->next_hop = 0;
     header->relay_node = 0;
     
-    // Payload: simple text message
+    // Payload: simple text message (normally this would be protobuf-encoded and encrypted)
+    // For testing, we send raw text - nodes may not decode it but should see the packet
     memcpy(&buffer[MESHTASTIC_HEADER_SIZE], testMsg, msgLen);
     
     *len = MESHTASTIC_HEADER_SIZE + msgLen;
@@ -320,19 +381,28 @@ void sendTestMessage(uint8_t protocol) {
         sx1276_setSyncWord(MESHCORE_SYNC_WORD);
         sx1276_setPreambleLength(MESHCORE_PREAMBLE);
         sx1276_setHeaderMode(true); // Implicit header mode
+        sx1276_setInvertIQ(false); // MeshCore uses normal IQ
+        sx1276_setCrc(true); // Enable CRC
         delay(20);
         
         snprintf(debugMsg, sizeof(debugMsg), "TX MeshCore: %d bytes @ %.3f MHz", testLen, DEFAULT_FREQUENCY_HZ / 1000000.0);
         usbComm.sendDebugLog(debugMsg);
         
+        // Verify radio is configured correctly before TX
+        uint8_t syncWord = sx1276_readRegister(REG_SYNC_WORD);
+        uint8_t opMode = sx1276_readRegister(REG_OP_MODE);
+        char verifyMsg[80];
+        snprintf(verifyMsg, sizeof(verifyMsg), "Pre-TX: sync=0x%02X mode=0x%02X", syncWord, opMode);
+        usbComm.sendDebugLog(verifyMsg);
+        
         if (transmitPacket(testBuffer, testLen)) {
-            meshcoreTxCount++;
+            SAFE_INCREMENT(meshcoreTxCount);
             digitalWrite(LED_PIN, HIGH);
             delay(50);
             digitalWrite(LED_PIN, LOW);
             usbComm.sendDebugLog("MeshCore test TX success");
         } else {
-            usbComm.sendDebugLog("MeshCore test TX failed");
+            usbComm.sendDebugLog("MeshCore test TX failed - check radio config");
         }
         
         // Return to listening mode
@@ -351,19 +421,29 @@ void sendTestMessage(uint8_t protocol) {
         sx1276_setSyncWord(MESHTASTIC_SYNC_WORD);
         sx1276_setPreambleLength(MESHTASTIC_PREAMBLE);
         sx1276_setHeaderMode(true); // Implicit header mode
+        sx1276_setInvertIQ(true); // Meshtastic uses inverted IQ
+        sx1276_setCrc(true); // Enable CRC
         delay(20);
         
         snprintf(debugMsg, sizeof(debugMsg), "TX Meshtastic: %d bytes @ %.3f MHz", testLen, MESHTASTIC_FREQUENCY_HZ / 1000000.0);
         usbComm.sendDebugLog(debugMsg);
         
+        // Verify radio is configured correctly before TX
+        uint8_t syncWord = sx1276_readRegister(REG_SYNC_WORD);
+        uint8_t opMode = sx1276_readRegister(REG_OP_MODE);
+        uint8_t invertIQ = sx1276_readRegister(REG_INVERT_IQ);
+        char verifyMsg[80];
+        snprintf(verifyMsg, sizeof(verifyMsg), "Pre-TX: sync=0x%02X mode=0x%02X IQ=0x%02X", syncWord, opMode, invertIQ);
+        usbComm.sendDebugLog(verifyMsg);
+        
         if (transmitPacket(testBuffer, testLen)) {
-            meshtasticTxCount++;
+            SAFE_INCREMENT(meshtasticTxCount);
             digitalWrite(LED_PIN, HIGH);
             delay(50);
             digitalWrite(LED_PIN, LOW);
             usbComm.sendDebugLog("Meshtastic test TX success");
         } else {
-            usbComm.sendDebugLog("Meshtastic test TX failed");
+            usbComm.sendDebugLog("Meshtastic test TX failed - check radio config");
         }
         
         // Return to listening mode

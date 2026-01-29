@@ -56,7 +56,9 @@ const Protocol = {
         if (data.length < 5) return null;
         
         const protocol = data[0]; // 0 = MeshCore, 1 = Meshtastic
-        const rssi = data[1] | (data[2] << 8);
+        // RSSI is signed 16-bit (int16_t), convert from unsigned to signed
+        let rssi = data[1] | (data[2] << 8);
+        if (rssi > 32767) rssi = rssi - 65536; // Convert unsigned to signed
         // Convert signed 8-bit SNR
         const snr = (data[3] > 127) ? data[3] - 256 : data[3];
         const len = data[4];
@@ -76,6 +78,12 @@ const Protocol = {
 
     // Decode DEBUG_LOG response
     decodeDebugLog(data) {
+        const decoder = new TextDecoder();
+        return decoder.decode(data);
+    },
+
+    // Decode ERROR response (same format as DEBUG_LOG - text message)
+    decodeError(data) {
         const decoder = new TextDecoder();
         return decoder.decode(data);
     }
