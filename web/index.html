@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0066cc">
+    <title>MeshCore-Meshtastic Proxy Control</title>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>MeshCore-Meshtastic Proxy</h1>
+            <div class="connection-status" id="connectionStatus">
+                <span class="status-indicator disconnected"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Statistics Panel -->
+            <section class="panel">
+                <h2>Statistics</h2>
+                <div class="stats-grid">
+                    <div class="stat-item meshcore">
+                        <label>MeshCore RX</label>
+                        <div class="value" id="meshcoreRx">0</div>
+                    </div>
+                    <div class="stat-item meshtastic">
+                        <label>Meshtastic RX</label>
+                        <div class="value" id="meshtasticRx">0</div>
+                    </div>
+                    <div class="stat-item meshcore">
+                        <label>MeshCore TX</label>
+                        <div class="value" id="meshcoreTx">0</div>
+                    </div>
+                    <div class="stat-item meshtastic">
+                        <label>Meshtastic TX</label>
+                        <div class="value" id="meshtasticTx">0</div>
+                    </div>
+                    <div class="stat-item error-stat">
+                        <label>Conversion Errors</label>
+                        <div class="value error-value" id="conversionErrors">0</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Protocol Status Panel -->
+            <section class="panel">
+                <h2>Protocol Status</h2>
+                <div class="protocol-status">
+                    <div class="protocol-indicator" id="meshcoreIndicator">
+                        <div class="protocol-header">
+                            <h3>MeshCore</h3>
+                            <span class="status-badge" id="meshcoreStatusBadge">Inactive</span>
+                        </div>
+                        <div class="frequency" id="meshcoreFreq">910.525 MHz</div>
+                        <div class="protocol-details">
+                            <div class="detail-item">
+                                <span class="detail-label">Last RX:</span>
+                                <span class="detail-value" id="meshcoreLastRx">Never</span>
+                            </div>
+                            <div class="detail-item">
+                                <span class="detail-label">Listening:</span>
+                                <span class="detail-value" id="meshcoreListening">No</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="protocol-indicator" id="meshtasticIndicator">
+                        <div class="protocol-header">
+                            <h3>Meshtastic</h3>
+                            <span class="status-badge" id="meshtasticStatusBadge">Inactive</span>
+                        </div>
+                        <div class="frequency" id="meshtasticFreq">906.875 MHz</div>
+                        <div class="protocol-details">
+                            <div class="detail-item">
+                                <span class="detail-label">Last RX:</span>
+                                <span class="detail-value" id="meshtasticLastRx">Never</span>
+                            </div>
+                            <div class="detail-item">
+                                <span class="detail-label">Listening:</span>
+                                <span class="detail-value" id="meshtasticListening">No</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Device Status Panel -->
+            <section class="panel">
+                <h2>Device Status</h2>
+                <div class="device-status-grid">
+                    <div class="status-item">
+                        <label>Current Activity</label>
+                        <div class="status-value" id="deviceActivity">Idle</div>
+                    </div>
+                    <div class="status-item">
+                        <label>Uptime</label>
+                        <div class="status-value" id="deviceUptime">--</div>
+                    </div>
+                    <div class="status-item">
+                        <label>Protocol Switches</label>
+                        <div class="status-value" id="protocolSwitches">0</div>
+                    </div>
+                    <div class="status-item">
+                        <label>Last Activity</label>
+                        <div class="status-value" id="lastActivity">--</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Control Panel -->
+            <section class="panel">
+                <h2>Control</h2>
+                <div class="control-buttons">
+                    <button id="connectBtn" class="btn btn-primary">Connect Proxy</button>
+                    <button id="disconnectBtn" class="btn btn-secondary" disabled>Disconnect</button>
+                    <button id="resetStatsBtn" class="btn btn-secondary" disabled>Reset Statistics</button>
+                    <button id="testMeshCoreBtn" class="btn btn-test" disabled>Test MeshCore TX</button>
+                    <button id="testMeshtasticBtn" class="btn btn-test" disabled>Test Meshtastic TX</button>
+                    <button id="testBothBtn" class="btn btn-test" disabled>Test Both TX</button>
+                </div>
+            </section>
+
+            <!-- Last Packet Panel -->
+            <section class="panel">
+                <h2>Last Received Packet</h2>
+                <div class="packet-viewer" id="lastPacket">
+                    <div style="color: #888;">No packets received yet</div>
+                </div>
+            </section>
+
+            <!-- Event Log Panel -->
+            <section class="panel">
+                <h2>Event Log</h2>
+                <div class="event-log" id="eventLog">
+                    <div class="log-entry info">Ready to connect...</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="./js/main.js"></script>
+</body>
+</html>

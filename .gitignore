@@ -1,0 +1,22 @@
+# PlatformIO
+.pio/
+.vscode/
+*.elf
+*.hex
+*.bin
+
+# Build artifacts
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

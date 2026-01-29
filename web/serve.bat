@@ -1,0 +1,3 @@
+@echo off
+echo Starting MeshCore-Meshtastic Proxy Web Interface...
+npm run dev
