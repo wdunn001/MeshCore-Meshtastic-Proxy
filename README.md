@@ -39,6 +39,12 @@ The device defaults to **853MHz**, but this proxy configures it to **910.525 MHz
 - **MeshCore Frequency**: 910.525 MHz
 - **Meshtastic Frequency**: 906.875 MHz
 
+**Note for Spectrum Analyzer Users**: When testing transmissions, look specifically at these frequencies:
+- MeshCore test messages: **910.525 MHz**
+- Meshtastic test messages: **906.875 MHz**
+
+These are in the 900 MHz ISM band (902-928 MHz in the US). The device switches between these frequencies during operation, so you may see activity on both frequencies.
+
 ## Protocol Details
 
 ### MeshCore Packet Format
@@ -88,9 +94,14 @@ Wire format (as defined in `RadioInterface.cpp`):
 The proxy operates using **time-slicing** to handle both protocols with a single radio:
 
 1. **Time-Sliced Reception**: Alternates between listening for MeshCore packets (sync word 0x12) and Meshtastic packets (sync word 0x2B) every 100ms
+   - **Important**: The device does **NOT** listen to both protocols simultaneously
+   - It switches between protocols every 100ms (configurable via `PROTOCOL_SWITCH_INTERVAL_MS`)
+   - Each protocol gets approximately 50% of listening time
+   - This means packets may be missed if they arrive during the other protocol's time slice
 2. **Packet Detection**: Uses sync word and packet structure to identify the protocol
 3. **Protocol Conversion**: Converts packet format between MeshCore and Meshtastic
 4. **Retransmission**: Immediately retransmits converted packets with appropriate LoRa parameters
+5. **Test Messages**: Automatically sends test messages on both protocols at startup, and can be triggered manually via the web interface
 
 ### Conversion Process
 
@@ -131,6 +142,21 @@ pio run --target upload
 pio device monitor
 ```
 
+**⚠️ IMPORTANT - Upload Process:**
+
+The LoRa32u4-II uses the ATMega32u4's built-in bootloader (avr109 protocol) which requires **manual activation**:
+
+1. **Double-press the RESET button** quickly (within 1 second)
+   - First press: Resets the board
+   - Second press: Enters bootloader mode
+2. **Wait 2 seconds** after double-pressing
+3. **Immediately run the upload command** (you have ~8 seconds to complete upload)
+4. The bootloader mode times out after ~8 seconds
+
+**Alternative**: Use the `upload.bat` script which guides you through this process.
+
+See `UPLOAD_TROUBLESHOOTING.md` for detailed troubleshooting.
+
 ### Working with Multiple Projects
 
 The workspace file `MeshcoreMeshstaticProxy.code-workspace` includes both this project and the ELRSDongle project. Open this workspace file in VS Code/Cursor to work with multiple PlatformIO projects simultaneously.
@@ -151,11 +177,25 @@ Then open `http://localhost:8001` in Chrome/Edge browser.
 
 ### Features
 
-- Real-time statistics monitoring
-- Protocol status display
-- Last received packet viewer
-- Event log
-- Statistics reset
+- **Real-time Statistics**: Monitor RX/TX counts for both protocols and conversion errors
+- **Protocol Status Indicators**: 
+  - Shows which protocol is currently listening (green border)
+  - Shows which protocols have received packets (blue "Active" badge)
+  - Displays last packet received timestamp for each protocol
+- **Device Status Panel**:
+  - Current activity (Idle, Listening, Processing Packet)
+  - Connection uptime
+  - Protocol switch count
+  - Last activity timestamp
+- **Test Message Transmission**:
+  - "Test MeshCore TX" button - sends test message on MeshCore frequency (910.525 MHz)
+  - "Test Meshtastic TX" button - sends test message on Meshtastic frequency (906.875 MHz)
+  - "Test Both TX" button - sends test messages on both protocols sequentially
+  - Test messages are automatically sent on startup
+- **Enhanced Error Display**: Conversion errors are highlighted in red with pulsing animation
+- **Last Received Packet Viewer**: Hex dump with protocol, RSSI, SNR, and length
+- **Event Log**: Real-time log with timestamps showing all proxy activity
+- **Statistics Reset**: Clear all counters
 
 See `web/README_WEB.md` for detailed web interface documentation.
 
@@ -198,31 +238,69 @@ Edit `src/config.h` to adjust:
 ## Limitations
 
 1. **Single Radio**: Cannot receive both protocols simultaneously - requires time-slicing
+   - Switches between protocols every 100ms (configurable)
+   - Each protocol gets ~50% of listening time
+   - Packets may be missed if they arrive during the other protocol's time slice
 2. **Packet Loss**: Time-slicing may cause missed packets if both protocols transmit simultaneously
 3. **Protocol Conversion**: Some metadata may be lost during conversion (e.g., exact routing paths)
 4. **Memory Constraints**: ATMega32u4 has limited RAM (2.5KB) - buffer sizes are optimized
 5. **Frequency Switching**: The proxy switches between 910.525 MHz (MeshCore) and 906.875 MHz (Meshtastic) - ensure both frequencies are within your antenna's range
+6. **Upload Process**: Requires manual bootloader activation (double-press RESET button)
 
 ## Troubleshooting
+
+### Upload Issues
+
+**"Programmer is not responding" or "butterfly_recv()" error:**
+
+- **Solution**: Double-press the RESET button RIGHT BEFORE uploading
+- The bootloader must be manually activated
+- You have ~8 seconds after double-press to complete upload
+- Close any serial monitors before uploading
+- See `UPLOAD_TROUBLESHOOTING.md` for detailed solutions
 
 ### No Packets Received
 
 1. **Check antenna**: Ensure 915MHz antenna is properly connected
-2. **Verify frequency**: Confirm MeshCore nodes are using 910.525 MHz
+2. **Verify frequency**: 
+   - MeshCore nodes must use **910.525 MHz**
+   - Meshtastic nodes must use **906.875 MHz**
+   - For spectrum analyzer: Look at these specific frequencies, not just "915 MHz"
 3. **Check sync words**: Ensure nodes are using correct sync words (0x12 for MeshCore, 0x2B for Meshtastic)
 4. **DIO1 wiring**: Verify DIO1 is connected to pin 5 (for versions < 1.3)
+5. **Time-slicing**: Remember the device alternates between protocols - packets may be missed
+
+### Test Messages Not Visible on Spectrum Analyzer
+
+1. **Check frequencies**: Look specifically at:
+   - **910.525 MHz** for MeshCore test messages
+   - **906.875 MHz** for Meshtastic test messages
+2. **Check web interface**: Look for "TX success" or "TX failed" messages in event log
+3. **Verify LED**: LED should blink when test message is transmitted
+4. **Check power**: Ensure power is set to maximum (17 dBm) - this is automatic
+5. **Antenna**: Verify antenna is properly connected
 
 ### Conversion Errors
 
+- **Visual indicator**: Conversion errors are highlighted in red in the web interface
 - Check serial output for error count
 - Verify packet sizes are within limits (255 bytes max)
 - Ensure LoRa parameters match between proxy and nodes
+- Check event log for detailed error messages
 
 ### Radio Not Initializing
 
 - Check SPI connections (NSS, MOSI, MISO, SCK)
 - Verify reset pin (pin 4) is connected
 - Check SX1276 version register returns 0x12
+- Look for "SX1276 initialized successfully" in serial output
+
+### Web Interface Issues
+
+- **Browser**: Must use Chrome or Edge (WebSerial API support)
+- **Connection**: Click "Connect Proxy" and select correct COM port
+- **No data**: Ensure device is powered and firmware is uploaded
+- **Statistics not updating**: Check that polling is active (should update every second)
 
 ## Project Structure
 
