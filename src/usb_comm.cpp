@@ -231,13 +231,3 @@ void USBComm::sendDebugLog(const char* message) {
     if (len > 64) len = 64;
     sendResponse(RESP_DEBUG_LOG, (uint8_t*)message, len);
 }
-
-void USBComm::sendError(const char* message) {
-    // Error messages are higher priority - try to send even if buffer is getting full
-    if (Serial.availableForWrite() < 20) {
-        return; // Skip if buffer is almost full
-    }
-    uint8_t len = strlen(message);
-    if (len > 64) len = 64;
-    sendResponse(RESP_ERROR, (uint8_t*)message, len);
-}

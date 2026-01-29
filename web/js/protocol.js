@@ -80,12 +80,6 @@ const Protocol = {
     decodeDebugLog(data) {
         const decoder = new TextDecoder();
         return decoder.decode(data);
-    },
-
-    // Decode ERROR response (same format as DEBUG_LOG - text message)
-    decodeError(data) {
-        const decoder = new TextDecoder();
-        return decoder.decode(data);
     }
 };
 

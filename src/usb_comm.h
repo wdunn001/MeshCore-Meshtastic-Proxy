@@ -27,7 +27,6 @@ public:
     void sendStats();
     void sendRxPacket(uint8_t protocol, int16_t rssi, int8_t snr, uint8_t* data, uint8_t len);
     void sendDebugLog(const char* message);
-    void sendError(const char* message);
     
 private:
     void handleCommand(uint8_t cmd, uint8_t* data, uint8_t len);
