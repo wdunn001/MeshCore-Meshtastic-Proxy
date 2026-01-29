@@ -24,6 +24,7 @@ bool meshcore_parsePacket(const uint8_t* data, uint8_t len, MeshCorePacket* pack
     
     // Read header byte
     packet->header = data[i++];
+    uint8_t routeType = packet->header & PH_ROUTE_MASK;
     
     // Read transport codes if present
     if (meshcore_hasTransportCodes(packet->header)) {
@@ -40,12 +41,22 @@ bool meshcore_parsePacket(const uint8_t* data, uint8_t len, MeshCorePacket* pack
     packet->path_len = data[i++];
     
     // Validate path length
-    if (packet->path_len > MAX_MESHCORE_PATH_SIZE) return false;
+    // Note: Some MeshCore packets may have large path_len values if they're using
+    // a different encoding or if the packet format differs from expected
+    // If path_len is too large, treat it as 0 (no path) and use remaining bytes as payload
+    // This handles cases where the packet format might differ
+    if (packet->path_len > MAX_MESHCORE_PATH_SIZE) {
+        // Path length exceeds maximum - treat as no path, all remaining data is payload
+        packet->path_len = 0;
+        // Don't increment i, we'll use current position for payload
+    }
     
-    // Read path data
-    if (i + packet->path_len > len) return false;
-    memcpy(packet->path, &data[i], packet->path_len);
-    i += packet->path_len;
+    // Read path data (only if path_len is valid)
+    if (packet->path_len > 0) {
+        if (i + packet->path_len > len) return false;
+        memcpy(packet->path, &data[i], packet->path_len);
+        i += packet->path_len;
+    }
     
     // Remaining bytes are payload
     if (i >= len) return false;

@@ -47,6 +47,18 @@ These are in the 900 MHz ISM band (902-928 MHz in the US). The device switches b
 
 ## Protocol Details
 
+### MeshCore Standard Channel ("Public")
+
+MeshCore uses a standard "Public" channel configuration (USA/Canada Recommended Preset) with the following parameters:
+- **Frequency**: 910.525 MHz
+- **Bandwidth**: 62.5 kHz
+- **Spreading Factor**: 7
+- **Coding Rate**: 5
+- **Sync Word**: 0x12
+- **Preamble**: 8 bytes
+
+This proxy is configured to match MeshCore's standard "Public" channel settings for maximum compatibility.
+
 ### MeshCore Packet Format
 
 Wire format (as defined in `Packet.cpp`):
@@ -60,12 +72,13 @@ Wire format (as defined in `Packet.cpp`):
 - Payload data (variable, max 184 bytes)
 ```
 
-**LoRa Parameters**:
+**LoRa Parameters** (USA/Canada Recommended Preset - "Public" channel):
 - Spreading Factor: 7
-- Bandwidth: 125 kHz
+- Bandwidth: 62.5 kHz (MeshCore standard)
 - Coding Rate: 5
 - Sync Word: 0x12
 - Preamble: 8 bytes
+- Transmit Power: 17 dBm (hardware limit for LoRa32u4-II; MeshCore may use up to 22 dBm)
 
 ### Meshtastic Packet Format
 
@@ -84,7 +97,7 @@ Wire format (as defined in `RadioInterface.cpp`):
 
 **LoRa Parameters**:
 - Spreading Factor: 7
-- Bandwidth: 125 kHz
+- Bandwidth: 250 kHz (Meshtastic standard)
 - Coding Rate: 5
 - Sync Word: 0x2B
 - Preamble: 16 bytes

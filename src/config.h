@@ -19,16 +19,17 @@
 #define DEFAULT_FREQUENCY_HZ 910525000  // 910.525 MHz (MeshCore default)
 #define MESHTASTIC_FREQUENCY_HZ 906875000  // 906.875 MHz (Meshtastic frequency)
 
-// LoRa Parameters - MeshCore
+// LoRa Parameters - MeshCore (USA/Canada Recommended Preset - "Public" channel)
+// Matches MeshCore's standard "Public" channel configuration for maximum compatibility
 #define MESHCORE_SF 7           // Spreading Factor
-#define MESHCORE_BW 7           // Bandwidth (7 = 125kHz)
+#define MESHCORE_BW 6           // Bandwidth (6 = 62.5kHz) - MeshCore standard
 #define MESHCORE_CR 5           // Coding Rate
 #define MESHCORE_SYNC_WORD 0x12 // MeshCore sync word
 #define MESHCORE_PREAMBLE 8     // Preamble length
 
 // LoRa Parameters - Meshtastic
 #define MESHTASTIC_SF 7           // Spreading Factor
-#define MESHTASTIC_BW 7           // Bandwidth (7 = 125kHz)
+#define MESHTASTIC_BW 8           // Bandwidth (8 = 250kHz) - Meshtastic standard
 #define MESHTASTIC_CR 5           // Coding Rate
 #define MESHTASTIC_SYNC_WORD 0x2B // Meshtastic sync word
 #define MESHTASTIC_PREAMBLE 16    // Preamble length (Meshtastic requirement)

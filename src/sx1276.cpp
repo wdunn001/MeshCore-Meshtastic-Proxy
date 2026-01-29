@@ -57,10 +57,10 @@ bool sx1276_init() {
     
     // Configure default parameters
     sx1276_setFrequency(DEFAULT_FREQUENCY_HZ);
-    sx1276_setBandwidth(MESHCORE_BW);  // 125kHz
+    sx1276_setBandwidth(MESHCORE_BW);  // 62.5kHz (MeshCore standard)
     sx1276_setSpreadingFactor(MESHCORE_SF); // SF7
     sx1276_setCodingRate(MESHCORE_CR); // CR 5
-    sx1276_setPower(17); // Max power
+    sx1276_setPower(17); // Max power (17 dBm - hardware limit for LoRa32u4-II)
     sx1276_setPreambleLength(MESHCORE_PREAMBLE);
     sx1276_setCrc(true);
     

@@ -151,6 +151,22 @@ void handleMeshCorePacket(uint8_t* data, uint8_t len) {
     MeshCorePacket meshcorePacket;
     if (!meshcore_parsePacket(data, len, &meshcorePacket)) {
         conversionErrors++;
+        // Debug: log packet details on parse failure
+        char debugMsg[100];
+        if (len > 0) {
+            uint8_t header = data[0];
+            uint8_t routeType = header & 0x03;
+            uint8_t payloadType = (header >> 2) & 0x0F;
+            uint8_t version = (header >> 6) & 0x03;
+            uint8_t pathLenPos = 1;
+            if (routeType == 0x00 || routeType == 0x03) {
+                pathLenPos = 5; // Has transport codes
+            }
+            uint8_t pathLen = (pathLenPos < len) ? data[pathLenPos] : 0;
+            snprintf(debugMsg, sizeof(debugMsg), "MeshCore parse fail: len=%d hdr=0x%02X rt=%d pt=%d v=%d plen=%d (max=%d)", 
+                     len, header, routeType, payloadType, version, pathLen, MAX_MESHCORE_PATH_SIZE);
+            usbComm.sendDebugLog(debugMsg);
+        }
         return;
     }
     
