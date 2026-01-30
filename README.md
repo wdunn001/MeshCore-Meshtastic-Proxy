@@ -116,9 +116,10 @@ The proxy operates using **time-slicing** to handle both protocols with a single
    - Each protocol gets approximately 50% of listening time
    - This means packets may be missed if they arrive during the other protocol's time slice
 2. **Packet Detection**: Uses sync word and packet structure to identify the protocol
-3. **Protocol Conversion**: Converts packet format between MeshCore and Meshtastic
-4. **Retransmission**: Immediately retransmits converted packets with appropriate LoRa parameters
-5. **Test Messages**: Automatically sends test messages on both protocols at startup, and can be triggered manually via the web interface
+3. **MQTT Filtering**: Meshtastic packets with `via_mqtt` flag set are filtered out before conversion - only radio-originated Meshtastic packets are forwarded to MeshCore (MeshCore is a pure radio mesh network)
+4. **Protocol Conversion**: Converts packet format between MeshCore and Meshtastic
+5. **Retransmission**: Immediately retransmits converted packets with appropriate LoRa parameters
+6. **Test Messages**: Automatically sends test messages on both protocols at startup, and can be triggered manually via the web interface
 
 ### Conversion Process
 
@@ -130,7 +131,8 @@ The proxy operates using **time-slicing** to handle both protocols with a single
 
 **Meshtastic → MeshCore**:
 - Parses Meshtastic 16-byte header
-- Extracts protobuf payload
+- **Filters out MQTT-originated packets**: Packets with `via_mqtt` flag set are dropped and not forwarded to MeshCore (MeshCore is a pure radio mesh network)
+- Extracts protobuf payload from radio-originated packets only
 - Creates MeshCore packet with FLOOD route type
 - Uses RAW_CUSTOM payload type to preserve protobuf data
 - Retransmits with MeshCore LoRa parameters
@@ -260,9 +262,10 @@ Edit `src/config.h` to adjust:
    - Packets may be missed if they arrive during the other protocol's time slice
 2. **Packet Loss**: Time-slicing may cause missed packets if both protocols transmit simultaneously
 3. **Protocol Conversion**: Some metadata may be lost during conversion (e.g., exact routing paths)
-4. **Memory Constraints**: ATMega32u4 has limited RAM (2.5KB) - buffer sizes are optimized
-5. **Frequency Switching**: The proxy switches between 910.525 MHz (MeshCore) and 906.875 MHz (Meshtastic) - ensure both frequencies are within your antenna's range
-6. **Upload Process**: Requires manual bootloader activation (double-press RESET button)
+4. **MQTT Filtering**: Meshtastic packets originating from MQTT/internet are filtered out and not forwarded to MeshCore - only radio-originated Meshtastic packets are bridged to MeshCore
+5. **Memory Constraints**: ATMega32u4 has limited RAM (2.5KB) - buffer sizes are optimized
+6. **Frequency Switching**: The proxy switches between 910.525 MHz (MeshCore) and 906.875 MHz (Meshtastic) - ensure both frequencies are within your antenna's range
+7. **Upload Process**: Requires manual bootloader activation (double-press RESET button)
 
 ## Troubleshooting
 
