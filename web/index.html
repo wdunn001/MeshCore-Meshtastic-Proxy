@@ -203,23 +203,17 @@
                     </div>
 
                     <div class="form-group">
-                        <label for="switchIntervalSelect">Switch Interval</label>
+                        <label for="switchIntervalInput">Switch Interval (ms)</label>
                         <div class="form-row">
-                            <select id="switchIntervalSelect" class="form-select" disabled>
-                                <option value="0">Off (Manual)</option>
-                                <option value="50">50ms (Fast)</option>
-                                <option value="100" selected>100ms (Default)</option>
-                                <option value="200">200ms</option>
-                                <option value="500">500ms</option>
-                                <option value="1000">1000ms (Slow)</option>
-                            </select>
+                            <input type="number" id="switchIntervalInput" class="form-select" min="50" max="1000" step="50" value="100" disabled>
                             <span id="switchIntervalDisplay" class="form-display">Current: 100ms</span>
                         </div>
-                        <div class="form-help">Set to "Off" for manual protocol control</div>
+                        <div class="form-help">Only used when Protocol Mode is set to Auto-Switch</div>
                     </div>
 
                     <div class="form-actions">
                         <button type="submit" id="saveSettingsBtn" class="btn btn-primary" disabled>Save Settings</button>
+                        <button type="button" id="cancelSettingsBtn" class="btn btn-secondary" disabled>Cancel</button>
                     </div>
                 </form>
 

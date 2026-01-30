@@ -269,7 +269,7 @@ void USBComm::sendResponse(uint8_t respId, uint8_t* data, uint8_t len) {
 
 void USBComm::sendInfo() {
     // Single point for all device state reporting - reuses stack buffer
-    uint8_t info[17];
+    uint8_t info[18];
     uint8_t* p = info;
     
     // Firmware version
@@ -296,10 +296,10 @@ void USBComm::sendInfo() {
     *p++ = currentProtocol;
     *p++ = meshcoreBandwidth;
     *p++ = meshtasticBandwidth;
-    *p++ = 0; // Reserved
+    *p++ = desiredProtocolMode; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
     *p++ = 0; // Reserved
     
-    sendResponse(RESP_INFO_REPLY, info, 17);
+    sendResponse(RESP_INFO_REPLY, info, 18);
 }
 
 void USBComm::sendStats() {

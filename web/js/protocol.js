@@ -30,7 +30,7 @@ const Protocol = {
 
     // Decode INFO_REPLY response
     decodeInfoReply(data) {
-        if (data.length < 17) return null; // Updated to 17 bytes
+        if (data.length < 18) return null; // Updated to 18 bytes
         return {
             fwVersionMajor: data[0],
             fwVersionMinor: data[1],
@@ -39,7 +39,8 @@ const Protocol = {
             switchInterval: data[10] | (data[11] << 8), // 16-bit value (little-endian)
             currentProtocol: data[12], // 0 = MeshCore, 1 = Meshtastic
             meshcoreBandwidth: data[13],
-            meshtasticBandwidth: data[14]
+            meshtasticBandwidth: data[14],
+            desiredProtocolMode: data[15] // 0 = MeshCore, 1 = Meshtastic, 2 = Auto-Switch
         };
     },
 

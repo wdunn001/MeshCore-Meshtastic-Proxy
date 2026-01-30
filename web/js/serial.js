@@ -1,4 +1,6 @@
 // WebSerial communication layer
+// Note: The firmware may send text debug output (Serial.print) which can interfere with
+// the binary protocol. This parser includes robust resynchronization to handle this.
 
 class SerialComm {
     constructor() {
@@ -26,6 +28,9 @@ class SerialComm {
             this.writer = this.port.writable.getWriter();
             this.reader = this.port.readable.getReader();
             this.isConnected = true;
+            
+            // Clear any buffered data from previous connection
+            this.readBuffer = new Uint8Array(0);
 
             // Start reading loop
             this.readLoop();
@@ -163,6 +168,83 @@ class SerialComm {
                         const respId = this.readBuffer[0];
                         const len = this.readBuffer[1];
                         
+                        // First check if respId is a valid response ID (0x81-0x85)
+                        // If not, we're likely out of sync (maybe text data mixed in)
+                        if (respId < 0x81 || respId > 0x85) {
+                            // Not a valid response ID - try to resync
+                            let found = false;
+                            // Search more aggressively for valid protocol header
+                            for (let i = 1; i < Math.min(this.readBuffer.length - 1, 100); i++) {
+                                const nextRespId = this.readBuffer[i];
+                                // Known response IDs: 0x81-0x85
+                                if (nextRespId >= 0x81 && nextRespId <= 0x85) {
+                                    // Found potential header - also check that next byte is reasonable
+                                    if (i + 1 < this.readBuffer.length) {
+                                        const nextLen = this.readBuffer[i + 1];
+                                        if (nextLen <= 64) {
+                                            // Looks like a valid header
+                                            if (i > 1) {
+                                                // Log discarded bytes for debugging
+                                                const discarded = Array.from(this.readBuffer.subarray(0, i))
+                                                    .map(b => String.fromCharCode(b >= 32 && b < 127 ? b : 46))
+                                                    .join('');
+                                                console.warn(`Resyncing: discarded ${i} bytes (${discarded.length > 0 ? `"${discarded}"` : 'non-text'})`);
+                                            }
+                                            this.readBuffer = this.readBuffer.subarray(i);
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (!found) {
+                                // No valid header found - clear buffer to prevent infinite loop
+                                const discarded = Array.from(this.readBuffer.subarray(0, Math.min(50, this.readBuffer.length)))
+                                    .map(b => String.fromCharCode(b >= 32 && b < 127 ? b : 46))
+                                    .join('');
+                                console.warn(`No valid protocol header found, clearing ${this.readBuffer.length} bytes (first 50 chars: "${discarded}")`);
+                                this.readBuffer = new Uint8Array(0);
+                            }
+                            break;
+                        }
+                        
+                        // Validate length (max reasonable message size is 64 bytes)
+                        if (len > 64) {
+                            console.warn(`Invalid message length: ${len} (respId: 0x${respId.toString(16)}) - likely out of sync`);
+                            // Try to find next valid message start by looking for known response IDs
+                            let found = false;
+                            // Search more aggressively
+                            for (let i = 2; i < Math.min(this.readBuffer.length - 1, 100); i++) {
+                                const nextRespId = this.readBuffer[i];
+                                // Known response IDs: 0x81-0x85
+                                if (nextRespId >= 0x81 && nextRespId <= 0x85) {
+                                    if (i + 1 < this.readBuffer.length) {
+                                        const nextLen = this.readBuffer[i + 1];
+                                        if (nextLen <= 64) {
+                                            // Log what we're discarding
+                                            const discarded = Array.from(this.readBuffer.subarray(0, i))
+                                                .map(b => {
+                                                    const hex = b.toString(16).padStart(2, '0');
+                                                    const char = (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
+                                                    return `${hex}(${char})`;
+                                                })
+                                                .join(' ');
+                                            console.warn(`Resyncing after invalid length: discarded ${i} bytes: ${discarded.substring(0, 200)}`);
+                                            this.readBuffer = this.readBuffer.subarray(i);
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (!found) {
+                                // No valid header found, clear buffer
+                                console.warn('No valid header found after invalid length, clearing buffer');
+                                this.readBuffer = new Uint8Array(0);
+                            }
+                            break;
+                        }
+                        
                         if (this.readBuffer.length < 2 + len) {
                             break; // Wait for more data
                         }
@@ -175,7 +257,11 @@ class SerialComm {
                         
                         // Handle message
                         if (this.onMessage) {
-                            this.onMessage(respId, messageData);
+                            try {
+                                this.onMessage(respId, messageData);
+                            } catch (error) {
+                                console.error('Error handling message:', error, 'respId:', respId, 'len:', len);
+                            }
                         }
                     }
                 }

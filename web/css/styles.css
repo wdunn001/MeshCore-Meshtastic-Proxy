@@ -260,6 +260,10 @@ body {
     transition: border-color 0.2s;
 }
 
+.form-select[type="number"] {
+    cursor: text;
+}
+
 .form-select:hover:not(:disabled) {
     border-color: var(--secondary-color);
 }

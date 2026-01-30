@@ -22,7 +22,9 @@ class App {
             protocolSwitches: 0,
             lastProtocol: null,
             connectionStartTime: null,
-            firmwareInfoLogged: false // Track if we've logged firmware info
+            firmwareInfoLogged: false, // Track if we've logged firmware info
+            controlsFormDirty: false, // Track if controls form has unsaved changes
+            infoReceived: false // Track if we've received device info response
         };
         
         this.statsInterval = null;
@@ -56,11 +58,28 @@ class App {
             this.saveSettings();
         });
         
+        // Mark form as dirty when controls are edited
+        document.getElementById('protocolSelect').addEventListener('change', () => {
+            this.state.controlsFormDirty = true;
+            this.updateIntervalInputState();
+        });
+        document.getElementById('switchIntervalInput').addEventListener('input', () => {
+            this.state.controlsFormDirty = true;
+        });
+        document.getElementById('switchIntervalInput').addEventListener('change', () => {
+            this.state.controlsFormDirty = true;
+        });
+        
         // Protocol parameter change handlers
         document.getElementById('meshcoreFreqInput').addEventListener('change', () => this.saveMeshCoreParams());
         document.getElementById('meshcoreBwSelect').addEventListener('change', () => this.saveMeshCoreParams());
         document.getElementById('meshtasticFreqInput').addEventListener('change', () => this.saveMeshtasticParams());
         document.getElementById('meshtasticBwSelect').addEventListener('change', () => this.saveMeshtasticParams());
+        
+        // Cancel button handler
+        document.getElementById('cancelSettingsBtn').addEventListener('click', () => {
+            this.cancelSettings();
+        });
     }
 
     async connect() {
@@ -73,18 +92,67 @@ class App {
             this.state.lastProtocol = null;
             this.state.protocolSwitches = 0;
             this.state.firmwareInfoLogged = false; // Reset so we log firmware info on reconnect
+            this.state.controlsFormDirty = false; // Reset dirty flag on new connection
+            this.state.infoReceived = false; // Reset info received flag
             window.UI.updateConnectionStatus(true);
             window.UI.enableButtons(true);
             window.UI.addLogEntry('Connected successfully', 'success');
             
-            // Request device info
-            await window.serialComm.getInfo();
+            // Give device a moment to initialize after connection
+            await new Promise(resolve => setTimeout(resolve, 150));
+            
+            // Request device info with retry logic
+            await this.requestDeviceInfoWithRetry();
+            
+            // Also request stats immediately to get packet counts
+            await window.serialComm.getStats();
+            
+            // Update interval input state after connection
+            this.updateIntervalInputState();
             
             // Start stats polling
             this.startStatsPolling();
             this.startStatusUpdates();
         } else {
             window.UI.addLogEntry('Connection failed', 'error');
+        }
+    }
+
+    async requestDeviceInfoWithRetry(maxRetries = 5, retryDelay = 200) {
+        const timeoutMs = 1500; // 1.5 second timeout per attempt
+        
+        // Try requesting info multiple times
+        for (let retryCount = 0; retryCount < maxRetries; retryCount++) {
+            if (retryCount > 0) {
+                window.UI.addLogEntry(`Requesting device info (attempt ${retryCount + 1}/${maxRetries})...`, 'info');
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            } else {
+                window.UI.addLogEntry('Requesting device info...', 'info');
+            }
+            
+            // Check if info was already received (from previous attempt)
+            if (this.state.infoReceived) {
+                break;
+            }
+            
+            await window.serialComm.getInfo();
+            
+            // Wait a bit for response, checking periodically
+            const waitStart = Date.now();
+            while ((Date.now() - waitStart) < timeoutMs) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                if (this.state.infoReceived) {
+                    break;
+                }
+            }
+            
+            if (this.state.infoReceived) {
+                break;
+            }
+        }
+        
+        if (!this.state.infoReceived) {
+            window.UI.addLogEntry('Warning: Device info not received immediately. Will retry via background polling.', 'error');
         }
     }
 
@@ -95,6 +163,8 @@ class App {
         this.state.connected = false;
         this.state.connectionStartTime = null;
         this.state.firmwareInfoLogged = false; // Reset for next connection
+        this.state.controlsFormDirty = false; // Reset dirty flag on disconnect
+        this.state.infoReceived = false; // Reset info received flag on disconnect
         
         try {
             await window.serialComm.disconnect();
@@ -228,32 +298,54 @@ class App {
         await window.serialComm.sendTestMessage(protocol);
     }
 
+    updateIntervalInputState() {
+        const protocolSelect = document.getElementById('protocolSelect');
+        const intervalInput = document.getElementById('switchIntervalInput');
+        const isAutoSwitch = parseInt(protocolSelect.value) === 2;
+        
+        // Only enable interval input when Auto-Switch is selected
+        intervalInput.disabled = !this.state.connected || !isAutoSwitch;
+    }
+
     async saveSettings() {
         const protocolSelect = document.getElementById('protocolSelect');
-        const intervalSelect = document.getElementById('switchIntervalSelect');
+        const intervalInput = document.getElementById('switchIntervalInput');
         
         const protocol = parseInt(protocolSelect.value);
-        const interval = parseInt(intervalSelect.value);
         
-        // Set switch interval first
-        if (interval !== this.state.switchInterval) {
-            const intervalText = interval === 0 ? 'Off (Manual)' : `${interval}ms`;
-            window.UI.addLogEntry(`Setting switch interval to ${intervalText}...`, 'info');
-            await window.serialComm.setSwitchInterval(interval);
-            this.state.switchInterval = interval;
-        }
-        
-        // Set protocol if not auto-switch
+        // Set protocol first
         if (protocol !== 2) {
+            // Manual mode - set protocol and disable auto-switch
             const protocolName = protocol === 0 ? 'MeshCore' : 'Meshtastic';
             window.UI.addLogEntry(`Setting protocol to ${protocolName}...`, 'info');
             await window.serialComm.setProtocol(protocol);
-        } else if (interval !== 0) {
-            // Auto-switch mode - just log
+            // Set interval to 0 to disable auto-switch
+            await window.serialComm.setSwitchInterval(0);
+            this.state.switchInterval = 0;
+        } else {
+            // Auto-switch mode - use interval value
+            const interval = parseInt(intervalInput.value);
+            if (interval !== this.state.switchInterval) {
+                window.UI.addLogEntry(`Setting switch interval to ${interval}ms...`, 'info');
+                await window.serialComm.setSwitchInterval(interval);
+                this.state.switchInterval = interval;
+            }
             window.UI.addLogEntry('Auto-switching enabled', 'info');
         }
         
+        // Reset dirty flag after saving
+        this.state.controlsFormDirty = false;
         window.UI.addLogEntry('Settings saved', 'info');
+    }
+
+    cancelSettings() {
+        // Reset dirty flag first so form will update when info response arrives
+        this.state.controlsFormDirty = false;
+        // Request fresh info to reset form to device state
+        if (this.state.connected) {
+            window.serialComm.getInfo();
+        }
+        window.UI.addLogEntry('Settings cancelled - form reset to device state', 'info');
     }
 
     async saveMeshCoreParams() {
@@ -289,6 +381,12 @@ class App {
             case window.Protocol.RESP_INFO_REPLY:
                 const info = window.Protocol.decodeInfoReply(data);
                 if (info) {
+                    // Mark that we've received info
+                    if (!this.state.infoReceived) {
+                        console.log('Device info received successfully');
+                    }
+                    this.state.infoReceived = true;
+                    
                     this.state.meshcoreFreq = info.meshcoreFreq;
                     this.state.meshtasticFreq = info.meshtasticFreq;
                     this.state.currentProtocol = info.currentProtocol;
@@ -296,16 +394,22 @@ class App {
                     this.state.meshcoreBandwidth = info.meshcoreBandwidth;
                     this.state.meshtasticBandwidth = info.meshtasticBandwidth;
                     
+                    // Use desiredProtocolMode from device if available, otherwise infer from switchInterval
+                    const protocolMode = info.desiredProtocolMode !== undefined 
+                        ? info.desiredProtocolMode 
+                        : (info.switchInterval === 0 ? info.currentProtocol : 2);
+                    
                     // Determine what protocol mode will be set in dropdown
-                    const protocolMode = info.switchInterval === 0 
-                        ? `Manual (${info.currentProtocol === 0 ? 'MeshCore' : 'Meshtastic'})` 
-                        : `Auto-Switch (${info.switchInterval}ms)`;
+                    const protocolModeText = protocolMode === 2 
+                        ? `Auto-Switch (${info.switchInterval}ms)` 
+                        : `Manual (${protocolMode === 0 ? 'MeshCore' : 'Meshtastic'})`;
                     
                     // Single consolidated log message with all device status
                     console.log('Device Status:', {
                         protocol: info.currentProtocol === 0 ? 'MeshCore' : 'Meshtastic',
                         switchInterval: info.switchInterval,
-                        protocolMode: protocolMode,
+                        desiredProtocolMode: protocolMode,
+                        protocolMode: protocolModeText,
                         meshcoreFreq: `${(info.meshcoreFreq / 1000000).toFixed(3)} MHz`,
                         meshtasticFreq: `${(info.meshtasticFreq / 1000000).toFixed(3)} MHz`,
                         meshcoreBW: info.meshcoreBandwidth,
@@ -314,16 +418,27 @@ class App {
                     
                     window.UI.updateFrequencies(info.meshcoreFreq, info.meshtasticFreq);
                     window.UI.updateProtocolStatus(info.currentProtocol);
-                    window.UI.updateSwitchInterval(info.switchInterval);
-                    window.UI.updateProtocolSelect(info.currentProtocol, info.switchInterval);
-                    window.UI.updateProtocolParams(info.meshcoreFreq, info.meshcoreBandwidth, info.meshtasticFreq, info.meshtasticBandwidth);
+                    // Only update form fields if form is not dirty
+                    if (!this.state.controlsFormDirty) {
+                        window.UI.updateSwitchInterval(info.switchInterval);
+                        window.UI.updateProtocolSelect(protocolMode, info.switchInterval);
+                        window.UI.updateProtocolParams(info.meshcoreFreq, info.meshcoreBandwidth, info.meshtasticFreq, info.meshtasticBandwidth);
+                    }
+                    
+                    // Update interval input enabled state based on protocol mode
+                    this.updateIntervalInputState();
                     
                     // Only log firmware info once on first connection
                     if (!this.state.firmwareInfoLogged) {
                         const intervalText = info.switchInterval === 0 ? 'Off (Manual)' : `${info.switchInterval}ms`;
-                        window.UI.addLogEntry(`Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Switch Interval: ${intervalText}`, 'info');
+                        const protocolModeTextLog = protocolMode === 2 
+                            ? `Auto-Switch (${info.switchInterval}ms)` 
+                            : `Manual (${protocolMode === 0 ? 'MeshCore' : 'Meshtastic'})`;
+                        window.UI.addLogEntry(`Device ready: Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Mode: ${protocolModeTextLog}`, 'success');
                         this.state.firmwareInfoLogged = true;
                     }
+                } else {
+                    console.warn('Failed to decode info response, data length:', data.length);
                 }
                 break;
                 
@@ -341,6 +456,8 @@ class App {
                     window.UI.updateMeshCoreTx(stats.meshcoreTx);
                     window.UI.updateMeshtasticTx(stats.meshtasticTx);
                     window.UI.updateConversionErrors(stats.conversionErrors);
+                } else {
+                    console.warn('Failed to decode stats response, data length:', data.length);
                 }
                 break;
                 
@@ -384,6 +501,7 @@ class App {
     handleError(error) {
         window.UI.addLogEntry(`Error: ${error.message}`, 'error');
         if (this.state.connected) {
+            // Disconnect will reset the dirty flag
             this.disconnect();
         }
     }

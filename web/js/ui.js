@@ -126,32 +126,13 @@ const UI = {
     },
 
     updateSwitchInterval(intervalMs) {
-        const select = document.getElementById('switchIntervalSelect');
+        const input = document.getElementById('switchIntervalInput');
         const display = document.getElementById('switchIntervalDisplay');
         
-        if (select) {
-            // Directly set value from polled status - find exact match or closest
-            let found = false;
-            for (let option of select.options) {
-                if (parseInt(option.value) === intervalMs) {
-                    select.value = option.value;
-                    found = true;
-                    break;
-                }
-            }
-            // If no exact match, find closest value
-            if (!found) {
-                let closestValue = '100';
-                let minDiff = Infinity;
-                for (let option of select.options) {
-                    const diff = Math.abs(parseInt(option.value) - intervalMs);
-                    if (diff < minDiff) {
-                        minDiff = diff;
-                        closestValue = option.value;
-                    }
-                }
-                select.value = closestValue;
-            }
+        if (input) {
+            // Clamp value to min/max range
+            const clampedValue = Math.max(50, Math.min(1000, intervalMs));
+            input.value = clampedValue.toString();
         }
         if (display) {
             const intervalText = intervalMs === 0 ? 'Off (Manual)' : `${intervalMs}ms`;
@@ -159,21 +140,22 @@ const UI = {
         }
     },
 
-    updateProtocolSelect(currentProtocol, switchInterval) {
+    updateProtocolSelect(desiredProtocolMode, switchInterval) {
         const protocolSelect = document.getElementById('protocolSelect');
         const protocolDisplay = document.getElementById('protocolDisplay');
         
         if (protocolSelect && protocolDisplay) {
-            // Directly set from polled status
-            if (switchInterval === 0) {
-                // Manual mode - use current protocol from device
-                protocolSelect.value = currentProtocol.toString();
-                const protocolName = currentProtocol === 0 ? 'MeshCore' : 'Meshtastic';
-                protocolDisplay.textContent = `Current: ${protocolName} (Manual)`;
-            } else {
+            // Only update if form is not dirty (checked by caller)
+            // Directly set from polled status - use desiredProtocolMode from device
+            protocolSelect.value = desiredProtocolMode.toString();
+            
+            if (desiredProtocolMode === 2) {
                 // Auto-switch mode
-                protocolSelect.value = '2';
                 protocolDisplay.textContent = `Current: Auto-Switch (${switchInterval}ms)`;
+            } else {
+                // Manual mode
+                const protocolName = desiredProtocolMode === 0 ? 'MeshCore' : 'Meshtastic';
+                protocolDisplay.textContent = `Current: ${protocolName} (Manual)`;
             }
         }
     },
@@ -184,6 +166,7 @@ const UI = {
         const meshtasticFreqInput = document.getElementById('meshtasticFreqInput');
         const meshtasticBwSelect = document.getElementById('meshtasticBwSelect');
         
+        // Only update if form is not dirty (checked by caller)
         if (meshcoreFreqInput) meshcoreFreqInput.value = (meshcoreFreq / 1000000).toFixed(3);
         if (meshcoreBwSelect) meshcoreBwSelect.value = meshcoreBw.toString();
         if (meshtasticFreqInput) meshtasticFreqInput.value = (meshtasticFreq / 1000000).toFixed(3);
@@ -245,8 +228,15 @@ const UI = {
         document.getElementById('testMeshtasticBtn').disabled = !connected;
         document.getElementById('testBothBtn').disabled = !connected;
         document.getElementById('saveSettingsBtn').disabled = !connected;
+        document.getElementById('cancelSettingsBtn').disabled = !connected;
         document.getElementById('protocolSelect').disabled = !connected;
-        document.getElementById('switchIntervalSelect').disabled = !connected;
+        // Interval input enabled state is controlled by protocol mode, not just connection
+        const protocolSelect = document.getElementById('protocolSelect');
+        const intervalInput = document.getElementById('switchIntervalInput');
+        if (intervalInput && protocolSelect) {
+            const isAutoSwitch = parseInt(protocolSelect.value) === 2;
+            intervalInput.disabled = !connected || !isAutoSwitch;
+        }
         document.getElementById('meshcoreFreqInput').disabled = !connected;
         document.getElementById('meshcoreBwSelect').disabled = !connected;
         document.getElementById('meshtasticFreqInput').disabled = !connected;
