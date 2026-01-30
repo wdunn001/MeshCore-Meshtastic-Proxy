@@ -24,5 +24,6 @@ bool meshtastic_parsePacket(const uint8_t* data, uint8_t len, MeshtasticHeader* 
 bool meshtastic_convertToMeshCore(const MeshtasticHeader* header, const uint8_t* payload, uint8_t payloadLen, uint8_t* output, uint8_t* outputLen);
 uint8_t meshtastic_getHopLimit(const MeshtasticHeader* header);
 bool meshtastic_isBroadcast(const MeshtasticHeader* header);
+bool meshtastic_isViaMqtt(const MeshtasticHeader* header);
 
 #endif // MESHTASTIC_HANDLER_H

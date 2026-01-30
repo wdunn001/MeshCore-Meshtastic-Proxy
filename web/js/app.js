@@ -295,6 +295,23 @@ class App {
                     this.state.switchInterval = info.switchInterval;
                     this.state.meshcoreBandwidth = info.meshcoreBandwidth;
                     this.state.meshtasticBandwidth = info.meshtasticBandwidth;
+                    
+                    // Determine what protocol mode will be set in dropdown
+                    const protocolMode = info.switchInterval === 0 
+                        ? `Manual (${info.currentProtocol === 0 ? 'MeshCore' : 'Meshtastic'})` 
+                        : `Auto-Switch (${info.switchInterval}ms)`;
+                    
+                    // Single consolidated log message with all device status
+                    console.log('Device Status:', {
+                        protocol: info.currentProtocol === 0 ? 'MeshCore' : 'Meshtastic',
+                        switchInterval: info.switchInterval,
+                        protocolMode: protocolMode,
+                        meshcoreFreq: `${(info.meshcoreFreq / 1000000).toFixed(3)} MHz`,
+                        meshtasticFreq: `${(info.meshtasticFreq / 1000000).toFixed(3)} MHz`,
+                        meshcoreBW: info.meshcoreBandwidth,
+                        meshtasticBW: info.meshtasticBandwidth
+                    });
+                    
                     window.UI.updateFrequencies(info.meshcoreFreq, info.meshtasticFreq);
                     window.UI.updateProtocolStatus(info.currentProtocol);
                     window.UI.updateSwitchInterval(info.switchInterval);

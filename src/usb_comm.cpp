@@ -19,6 +19,7 @@ enum ProtocolState {
 extern ProtocolState currentProtocol;
 extern uint16_t protocolSwitchIntervalMs; // Configurable switch interval
 extern bool autoSwitchEnabled; // Auto-switching enabled flag
+extern uint8_t desiredProtocolMode; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
 extern uint32_t meshcoreFrequencyHz;
 extern uint8_t meshcoreBandwidth;
 extern uint32_t meshtasticFrequencyHz;
@@ -108,14 +109,29 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             
         case CMD_SET_PROTOCOL:
             if (len == 1) {
-                // 0 = MeshCore, 1 = Meshtastic
+                // 0 = MeshCore, 1 = Meshtastic, 2 = Auto-Switch
                 uint8_t protocol = data[0];
                 if (protocol == 0) {
-                    setProtocol(LISTENING_MESHCORE);
-                    sendDebugLog("Set to MC");
+                    desiredProtocolMode = 0;
+                    // If auto-switch is disabled, switch immediately
+                    if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
+                        setProtocol(LISTENING_MESHCORE);
+                    }
+                    sendDebugLog("Mode: MC");
                 } else if (protocol == 1) {
-                    setProtocol(LISTENING_MESHTASTIC);
-                    sendDebugLog("Set to MT");
+                    desiredProtocolMode = 1;
+                    // If auto-switch is disabled, switch immediately
+                    if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
+                        setProtocol(LISTENING_MESHTASTIC);
+                    }
+                    sendDebugLog("Mode: MT");
+                } else if (protocol == 2) {
+                    desiredProtocolMode = 2;
+                    // Enable auto-switch if interval is set
+                    if (protocolSwitchIntervalMs > 0) {
+                        autoSwitchEnabled = true;
+                    }
+                    sendDebugLog("Mode: Auto");
                 } else {
                     sendDebugLog("ERR: Bad proto");
                 }
@@ -154,6 +170,12 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
                 if (newInterval == 0) {
                     protocolSwitchIntervalMs = 0;
                     autoSwitchEnabled = false;
+                    // When disabling auto-switch, enforce desired protocol mode
+                    if (desiredProtocolMode == 0) {
+                        setProtocol(LISTENING_MESHCORE);
+                    } else if (desiredProtocolMode == 1) {
+                        setProtocol(LISTENING_MESHTASTIC);
+                    }
                     sendDebugLog("Manual mode");
                 } else if (newInterval >= PROTOCOL_SWITCH_INTERVAL_MS_MIN && 
                            newInterval <= PROTOCOL_SWITCH_INTERVAL_MS_MAX) {
@@ -246,66 +268,60 @@ void USBComm::sendResponse(uint8_t respId, uint8_t* data, uint8_t len) {
 }
 
 void USBComm::sendInfo() {
+    // Single point for all device state reporting - reuses stack buffer
     uint8_t info[17];
-    info[0] = 0x01; // Firmware version major
-    info[1] = 0x00; // Firmware version minor
-    info[2] = (uint8_t)(meshcoreFrequencyHz & 0xFF);
-    info[3] = (uint8_t)((meshcoreFrequencyHz >> 8) & 0xFF);
-    info[4] = (uint8_t)((meshcoreFrequencyHz >> 16) & 0xFF);
-    info[5] = (uint8_t)((meshcoreFrequencyHz >> 24) & 0xFF);
-    info[6] = (uint8_t)(meshtasticFrequencyHz & 0xFF);
-    info[7] = (uint8_t)((meshtasticFrequencyHz >> 8) & 0xFF);
-    info[8] = (uint8_t)((meshtasticFrequencyHz >> 16) & 0xFF);
-    info[9] = (uint8_t)((meshtasticFrequencyHz >> 24) & 0xFF);
-    info[10] = (uint8_t)(protocolSwitchIntervalMs & 0xFF);        // Switch interval low byte
-    info[11] = (uint8_t)((protocolSwitchIntervalMs >> 8) & 0xFF); // Switch interval high byte
-    info[12] = currentProtocol; // 0 = MeshCore, 1 = Meshtastic
-    info[13] = meshcoreBandwidth;
-    info[14] = meshtasticBandwidth;
-    // Reserve bytes 15-16 for future use
-    info[15] = 0;
-    info[16] = 0;
+    uint8_t* p = info;
+    
+    // Firmware version
+    *p++ = 0x01; // Major
+    *p++ = 0x00; // Minor
+    
+    // MeshCore frequency (4 bytes, little-endian)
+    *p++ = (uint8_t)(meshcoreFrequencyHz & 0xFF);
+    *p++ = (uint8_t)((meshcoreFrequencyHz >> 8) & 0xFF);
+    *p++ = (uint8_t)((meshcoreFrequencyHz >> 16) & 0xFF);
+    *p++ = (uint8_t)((meshcoreFrequencyHz >> 24) & 0xFF);
+    
+    // Meshtastic frequency (4 bytes, little-endian)
+    *p++ = (uint8_t)(meshtasticFrequencyHz & 0xFF);
+    *p++ = (uint8_t)((meshtasticFrequencyHz >> 8) & 0xFF);
+    *p++ = (uint8_t)((meshtasticFrequencyHz >> 16) & 0xFF);
+    *p++ = (uint8_t)((meshtasticFrequencyHz >> 24) & 0xFF);
+    
+    // Switch interval (2 bytes, little-endian)
+    *p++ = (uint8_t)(protocolSwitchIntervalMs & 0xFF);
+    *p++ = (uint8_t)((protocolSwitchIntervalMs >> 8) & 0xFF);
+    
+    // Current protocol and bandwidths
+    *p++ = currentProtocol;
+    *p++ = meshcoreBandwidth;
+    *p++ = meshtasticBandwidth;
+    *p++ = 0; // Reserved
+    *p++ = 0; // Reserved
     
     sendResponse(RESP_INFO_REPLY, info, 17);
 }
 
 void USBComm::sendStats() {
+    // Single point for all statistics reporting - reuses stack buffer
     uint8_t stats[24];
+    uint8_t* p = stats;
     
-    // MeshCore RX count (4 bytes)
-    stats[0] = (uint8_t)(meshcoreRxCount & 0xFF);
-    stats[1] = (uint8_t)((meshcoreRxCount >> 8) & 0xFF);
-    stats[2] = (uint8_t)((meshcoreRxCount >> 16) & 0xFF);
-    stats[3] = (uint8_t)((meshcoreRxCount >> 24) & 0xFF);
+    // Helper macro to pack uint32_t (little-endian)
+    #define PACK_U32(val) \
+        *p++ = (uint8_t)((val) & 0xFF); \
+        *p++ = (uint8_t)(((val) >> 8) & 0xFF); \
+        *p++ = (uint8_t)(((val) >> 16) & 0xFF); \
+        *p++ = (uint8_t)(((val) >> 24) & 0xFF);
     
-    // Meshtastic RX count (4 bytes)
-    stats[4] = (uint8_t)(meshtasticRxCount & 0xFF);
-    stats[5] = (uint8_t)((meshtasticRxCount >> 8) & 0xFF);
-    stats[6] = (uint8_t)((meshtasticRxCount >> 16) & 0xFF);
-    stats[7] = (uint8_t)((meshtasticRxCount >> 24) & 0xFF);
+    PACK_U32(meshcoreRxCount);
+    PACK_U32(meshtasticRxCount);
+    PACK_U32(meshcoreTxCount);
+    PACK_U32(meshtasticTxCount);
+    PACK_U32(conversionErrors);
+    PACK_U32(parseErrors);
     
-    // MeshCore TX count (4 bytes)
-    stats[8] = (uint8_t)(meshcoreTxCount & 0xFF);
-    stats[9] = (uint8_t)((meshcoreTxCount >> 8) & 0xFF);
-    stats[10] = (uint8_t)((meshcoreTxCount >> 16) & 0xFF);
-    stats[11] = (uint8_t)((meshcoreTxCount >> 24) & 0xFF);
-    
-    // Meshtastic TX count (4 bytes)
-    stats[12] = (uint8_t)(meshtasticTxCount & 0xFF);
-    stats[13] = (uint8_t)((meshtasticTxCount >> 8) & 0xFF);
-    stats[14] = (uint8_t)((meshtasticTxCount >> 16) & 0xFF);
-    stats[15] = (uint8_t)((meshtasticTxCount >> 24) & 0xFF);
-    
-    // Conversion errors (4 bytes)
-    stats[16] = (uint8_t)(conversionErrors & 0xFF);
-    stats[17] = (uint8_t)((conversionErrors >> 8) & 0xFF);
-    stats[18] = (uint8_t)((conversionErrors >> 16) & 0xFF);
-    stats[19] = (uint8_t)((conversionErrors >> 24) & 0xFF);
-    // Parse errors (4 bytes)
-    stats[20] = (uint8_t)(parseErrors & 0xFF);
-    stats[21] = (uint8_t)((parseErrors >> 8) & 0xFF);
-    stats[22] = (uint8_t)((parseErrors >> 16) & 0xFF);
-    stats[23] = (uint8_t)((parseErrors >> 24) & 0xFF);
+    #undef PACK_U32
     
     sendResponse(RESP_STATS, stats, 24);
 }

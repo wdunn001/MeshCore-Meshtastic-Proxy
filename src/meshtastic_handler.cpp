@@ -41,6 +41,10 @@ bool meshtastic_isBroadcast(const MeshtasticHeader* header) {
     return header->to == 0xFFFFFFFF;
 }
 
+bool meshtastic_isViaMqtt(const MeshtasticHeader* header) {
+    return (header->flags & PACKET_FLAGS_VIA_MQTT_MASK) != 0;
+}
+
 bool meshtastic_convertToMeshCore(const MeshtasticHeader* header, const uint8_t* payload, uint8_t payloadLen, uint8_t* output, uint8_t* outputLen) {
     if (header == NULL || payload == NULL || output == NULL || outputLen == NULL) {
         return false;

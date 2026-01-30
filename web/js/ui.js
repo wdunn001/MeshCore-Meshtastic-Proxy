@@ -130,7 +130,7 @@ const UI = {
         const display = document.getElementById('switchIntervalDisplay');
         
         if (select) {
-            // Find matching option or set to closest
+            // Directly set value from polled status - find exact match or closest
             let found = false;
             for (let option of select.options) {
                 if (parseInt(option.value) === intervalMs) {
@@ -139,11 +139,18 @@ const UI = {
                     break;
                 }
             }
-            if (!found && intervalMs === 0) {
-                select.value = '0';
-            } else if (!found) {
-                // Set to closest value
-                select.value = '100';
+            // If no exact match, find closest value
+            if (!found) {
+                let closestValue = '100';
+                let minDiff = Infinity;
+                for (let option of select.options) {
+                    const diff = Math.abs(parseInt(option.value) - intervalMs);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        closestValue = option.value;
+                    }
+                }
+                select.value = closestValue;
             }
         }
         if (display) {
@@ -157,8 +164,9 @@ const UI = {
         const protocolDisplay = document.getElementById('protocolDisplay');
         
         if (protocolSelect && protocolDisplay) {
+            // Directly set from polled status
             if (switchInterval === 0) {
-                // Manual mode - show current protocol
+                // Manual mode - use current protocol from device
                 protocolSelect.value = currentProtocol.toString();
                 const protocolName = currentProtocol === 0 ? 'MeshCore' : 'Meshtastic';
                 protocolDisplay.textContent = `Current: ${protocolName} (Manual)`;

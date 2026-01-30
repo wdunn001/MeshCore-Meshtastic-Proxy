@@ -17,6 +17,7 @@ ProtocolState currentProtocol = LISTENING_MESHCORE;
 unsigned long lastProtocolSwitch = 0;
 uint16_t protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT; // Configurable switch interval
 bool autoSwitchEnabled = true; // Enable/disable automatic protocol switching
+uint8_t desiredProtocolMode = 2; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
 
 // Configurable LoRa parameters
 uint32_t meshcoreFrequencyHz = DEFAULT_FREQUENCY_HZ;
@@ -240,6 +241,12 @@ void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
             snprintf(errorMsg, sizeof(errorMsg), "ERR: MT parse fail len=%d", len);
         }
         usbComm.sendDebugLog(errorMsg);
+        return;
+    }
+    
+    // CRITICAL: Filter out MQTT-originated packets - MeshCore must not receive internet traffic
+    if (meshtastic_isViaMqtt(&header)) {
+        // Silently drop MQTT packets - don't convert or forward to MeshCore
         return;
     }
     
@@ -485,6 +492,7 @@ void setup() {
     meshtasticBandwidth = MESHTASTIC_BW;
     protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
     autoSwitchEnabled = true;
+    desiredProtocolMode = 2; // Default to auto-switch
     
     // Start listening for MeshCore packets
     configureForMeshCore();
@@ -510,8 +518,18 @@ void loop() {
     // Process USB commands
     usbComm.process();
     
-    // Time-slice between protocols
-    switchProtocol();
+    // Enforce protocol mode if auto-switch is disabled
+    if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
+        // Manual mode - ensure protocol matches desired mode
+        if (desiredProtocolMode == 0 && currentProtocol != LISTENING_MESHCORE) {
+            setProtocol(LISTENING_MESHCORE);
+        } else if (desiredProtocolMode == 1 && currentProtocol != LISTENING_MESHTASTIC) {
+            setProtocol(LISTENING_MESHTASTIC);
+        }
+    } else {
+        // Auto-switch mode - time-slice between protocols
+        switchProtocol();
+    }
     
     // Check for received packet
     if (packetReceived) {
@@ -532,6 +550,10 @@ void loop() {
                 usbComm.sendRxPacket(1, rssi, snr, rxBuffer, packetLen);
                 handleMeshtasticPacket(rxBuffer, packetLen);
             }
+            
+            // CRITICAL FIX: Restart RX mode after successful packet read (like MeshCore does)
+            // After reading FIFO, SX1276 needs RX mode restarted to receive next packet
+            sx1276_setMode(MODE_RX_CONTINUOUS);
         } else {
             // Restart receive mode if packet read failed
             if (currentProtocol == LISTENING_MESHCORE) {
