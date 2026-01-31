@@ -193,22 +193,52 @@
                         <label for="protocolSelect">Protocol Mode</label>
                         <div class="form-row">
                             <select id="protocolSelect" class="form-select" disabled>
-                                <option value="0">MeshCore</option>
-                                <option value="1">Meshtastic</option>
+                                <option value="0">Manual</option>
                                 <option value="2">Auto-Switch</option>
                             </select>
                             <span id="protocolDisplay" class="form-display">Current: Auto-Switch</span>
                         </div>
-                        <div class="form-help">Select protocol or enable auto-switching</div>
+                        <div class="form-help">Manual: listen to one protocol, transmit to others. Auto: switches between protocols</div>
                     </div>
 
-                    <div class="form-group">
+                    <div class="form-group" id="listenProtocolGroup">
+                        <label for="listenProtocolSelect">Listen Protocol</label>
+                        <div class="form-row">
+                            <select id="listenProtocolSelect" class="form-select" disabled>
+                                <option value="0">MeshCore</option>
+                                <option value="1">Meshtastic</option>
+                            </select>
+                            <span id="listenProtocolDisplay" class="form-display">Current: MeshCore</span>
+                        </div>
+                        <div class="form-help">Protocol to listen for incoming packets</div>
+                    </div>
+
+                    <div class="form-group" id="transmitProtocolsGroup">
+                        <label>Transmit Protocols</label>
+                        <div class="form-row">
+                            <div class="checkbox-group" id="transmitProtocolsCheckboxes">
+                                <!-- Dynamically populated by JavaScript -->
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="transmitProtocol0" value="0" disabled>
+                                    <span>MeshCore</span>
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="transmitProtocol1" value="1" disabled>
+                                    <span>Meshtastic</span>
+                                </label>
+                            </div>
+                            <span id="transmitProtocolsDisplay" class="form-display">Current: Meshtastic</span>
+                        </div>
+                        <div class="form-help">Protocols to relay received packets to (auto-set to all except listen protocol)</div>
+                    </div>
+
+                    <div class="form-group" id="switchIntervalGroup">
                         <label for="switchIntervalInput">Switch Interval (ms)</label>
                         <div class="form-row">
                             <input type="number" id="switchIntervalInput" class="form-select" min="50" max="1000" step="50" value="100" disabled>
                             <span id="switchIntervalDisplay" class="form-display">Current: 100ms</span>
                         </div>
-                        <div class="form-help">Only used when Protocol Mode is set to Auto-Switch</div>
+                        <div class="form-help">Time between protocol switches in auto mode</div>
                     </div>
 
                     <div class="form-actions">

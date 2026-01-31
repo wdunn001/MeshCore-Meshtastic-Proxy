@@ -9,8 +9,9 @@ const Protocol = {
     CMD_RESET_STATS: 0x05,
     CMD_SEND_TEST: 0x06,
     CMD_SET_SWITCH_INTERVAL: 0x07,
-    CMD_SET_MESHCORE_PARAMS: 0x08,
-    CMD_SET_MESHTASTIC_PARAMS: 0x09,
+    CMD_SET_PROTOCOL_PARAMS: 0x08,  // Generic: 1 byte protocol ID + 4 bytes freq + 1 byte bandwidth
+    CMD_SET_RX_PROTOCOL: 0x09,       // Set listen protocol: 1 byte protocol ID
+    CMD_SET_TX_PROTOCOLS: 0x0A,      // Set transmit protocols: 1 byte bitmask (bit 0=MeshCore, bit 1=Meshtastic)
 
     // Response IDs
     RESP_INFO_REPLY: 0x81,

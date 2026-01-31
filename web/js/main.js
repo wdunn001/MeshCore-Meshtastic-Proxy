@@ -1,5 +1,6 @@
 // Main entry point - imports and initializes modules
 
+import './protocol_registry.js';
 import './protocol.js';
 import './serial.js';
 import './ui.js';

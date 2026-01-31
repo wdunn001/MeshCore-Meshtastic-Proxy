@@ -1,35 +1,28 @@
 #include "usb_comm.h"
 #include "config.h"
+#include "protocols/protocol_state.h"
+#include "protocols/protocol_manager.h"
+#include "protocols/protocol_interface.h"
+#include "radio/radio_interface.h"
 #include <Arduino.h>
 #include <string.h>
 
 // Forward declarations from main.cpp
-extern uint32_t meshcoreRxCount;
-extern uint32_t meshtasticRxCount;
-extern uint32_t meshcoreTxCount;
-extern uint32_t meshtasticTxCount;
-extern uint32_t conversionErrors;
-extern uint32_t parseErrors;
-
-// Protocol state enum (must match main.cpp)
-enum ProtocolState {
-    LISTENING_MESHCORE,
-    LISTENING_MESHTASTIC
-};
-extern ProtocolState currentProtocol;
+extern ProtocolId rx_protocol;      // Currently listening protocol
+extern ProtocolId tx_protocols[];  // Protocols to transmit to
+extern uint8_t tx_protocol_count;   // Number of transmit protocols
+extern ProtocolState currentProtocol;  // Legacy protocol state
 extern uint16_t protocolSwitchIntervalMs; // Configurable switch interval
 extern bool autoSwitchEnabled; // Auto-switching enabled flag
-extern uint8_t desiredProtocolMode; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
-extern uint32_t meshcoreFrequencyHz;
-extern uint8_t meshcoreBandwidth;
-extern uint32_t meshtasticFrequencyHz;
-extern uint8_t meshtasticBandwidth;
+extern uint8_t desiredProtocolMode; // 0=First protocol, 1=Second protocol, 2=Auto-Switch
+extern ProtocolRuntimeState protocolStates[];  // Protocol runtime state objects
 
 // Forward declarations
-void sendTestMessage(uint8_t protocol);
+void sendTestMessage(ProtocolId protocol);
 void setProtocol(ProtocolState protocol);
-void configureForMeshCore();
-void configureForMeshtastic();
+void configureProtocol(ProtocolId protocol);
+void set_rx_protocol(ProtocolId protocol);
+void set_tx_protocols(uint8_t bitmask);
 
 USBComm usbComm;
 
@@ -109,22 +102,20 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             
         case CMD_SET_PROTOCOL:
             if (len == 1) {
-                // 0 = MeshCore, 1 = Meshtastic, 2 = Auto-Switch
+                // 0 = First protocol, 1 = Second protocol, 2 = Auto-Switch
                 uint8_t protocol = data[0];
-                if (protocol == 0) {
-                    desiredProtocolMode = 0;
+                if (protocol < PROTOCOL_COUNT) {
+                    desiredProtocolMode = protocol;
                     // If auto-switch is disabled, switch immediately
                     if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
-                        setProtocol(LISTENING_MESHCORE);
+                        setProtocol((ProtocolState)protocol);
                     }
-                    sendDebugLog("Mode: MC");
-                } else if (protocol == 1) {
-                    desiredProtocolMode = 1;
-                    // If auto-switch is disabled, switch immediately
-                    if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
-                        setProtocol(LISTENING_MESHTASTIC);
+                    ProtocolInterfaceImpl* iface = protocol_interface_get((ProtocolId)protocol);
+                    if (iface != nullptr) {
+                        char msg[20];
+                        snprintf(msg, sizeof(msg), "Mode: %s", iface->name);
+                        sendDebugLog(msg);
                     }
-                    sendDebugLog("Mode: MT");
                 } else if (protocol == 2) {
                     desiredProtocolMode = 2;
                     // Enable auto-switch if interval is set
@@ -139,25 +130,32 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             break;
             
         case CMD_RESET_STATS:
-            meshcoreRxCount = 0;
-            meshtasticRxCount = 0;
-            meshcoreTxCount = 0;
-            meshtasticTxCount = 0;
-            conversionErrors = 0;
-            parseErrors = 0;
+            // Reset stats for all protocols dynamically
+            if (protocolStates != nullptr) {
+                for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+                    protocolStates[id].stats.rxCount = 0;
+                    protocolStates[id].stats.txCount = 0;
+                    protocolStates[id].stats.parseErrors = 0;
+                    protocolStates[id].stats.conversionErrors = 0;
+                }
+            }
             sendDebugLog("Stats reset");
             break;
             
         case CMD_SEND_TEST:
             if (len == 1) {
-                // 0 = MeshCore, 1 = Meshtastic, 2 = Both
+                // 0 = First protocol, 1 = Second protocol, 2 = All protocols
                 uint8_t protocol = data[0];
-                if (protocol == 0 || protocol == 2) {
-                    sendTestMessage(0); // MeshCore
-                }
-                if (protocol == 1 || protocol == 2) {
-                    delay(200); // Small delay between transmissions
-                    sendTestMessage(1); // Meshtastic
+                if (protocol < PROTOCOL_COUNT) {
+                    sendTestMessage((ProtocolId)protocol);
+                } else if (protocol == 2) {
+                    // Send test messages to all transmit protocols
+                    for (uint8_t i = 0; i < tx_protocol_count; i++) {
+                        sendTestMessage(tx_protocols[i]);
+                        if (i < tx_protocol_count - 1) {
+                            delay(200); // Small delay between transmissions
+                        }
+                    }
                 }
             }
             break;
@@ -171,10 +169,8 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
                     protocolSwitchIntervalMs = 0;
                     autoSwitchEnabled = false;
                     // When disabling auto-switch, enforce desired protocol mode
-                    if (desiredProtocolMode == 0) {
-                        setProtocol(LISTENING_MESHCORE);
-                    } else if (desiredProtocolMode == 1) {
-                        setProtocol(LISTENING_MESHTASTIC);
+                    if (desiredProtocolMode < PROTOCOL_COUNT) {
+                        setProtocol((ProtocolState)desiredProtocolMode);
                     }
                     sendDebugLog("Manual mode");
                 } else if (newInterval >= PROTOCOL_SWITCH_INTERVAL_MS_MIN && 
@@ -193,55 +189,98 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
             }
             break;
             
-        case CMD_SET_MESHCORE_PARAMS:
-            if (len == 5) {
-                // 4 bytes frequency (little-endian) + 1 byte bandwidth
-                uint32_t newFreq = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
-                uint8_t newBw = data[4];
-                // Validate frequency (915 MHz ISM band: 902-928 MHz)
-                if (newFreq >= 902000000 && newFreq <= 928000000) {
-                    meshcoreFrequencyHz = newFreq;
-                    sendDebugLog("MeshCore freq updated");
+        case CMD_SET_PROTOCOL_PARAMS:
+            if (len == 6) {
+                // Generic command: Set protocol params
+                // 1 byte protocol ID + 4 bytes frequency (little-endian) + 1 byte bandwidth
+                ProtocolId targetProtocol = (ProtocolId)data[0];
+                uint32_t newFreq = (uint32_t)data[1] | ((uint32_t)data[2] << 8) | ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
+                uint8_t newBw = data[5];
+                
+                // Update protocol state config
+                if (protocolStates != nullptr && targetProtocol < PROTOCOL_COUNT) {
+                    ProtocolRuntimeState* state = &protocolStates[targetProtocol];
+                    
+                    // Validate frequency using radio interface capabilities
+                    uint32_t minFreq = radio_getMinFrequency();
+                    uint32_t maxFreq = radio_getMaxFrequency();
+                    if (newFreq >= minFreq && newFreq <= maxFreq) {
+                        state->config.frequencyHz = newFreq;
+                        protocol_manager_setFrequency(targetProtocol, newFreq);
+                        ProtocolInterfaceImpl* iface = protocol_interface_get(targetProtocol);
+                        if (iface != nullptr) {
+                            char msg[40];
+                            snprintf(msg, sizeof(msg), "%s freq updated", iface->name);
+                            sendDebugLog(msg);
+                        }
+                    } else {
+                        sendDebugLog("ERR: Invalid freq");
+                    }
+                    // Validate bandwidth (0-9: 7.8kHz to 500kHz)
+                    if (newBw <= 9) {
+                        state->config.bandwidth = newBw;
+                        protocol_manager_setBandwidth(targetProtocol, newBw);
+                        ProtocolInterfaceImpl* iface = protocol_interface_get(targetProtocol);
+                        if (iface != nullptr) {
+                            char msg[40];
+                            snprintf(msg, sizeof(msg), "%s BW updated", iface->name);
+                            sendDebugLog(msg);
+                        }
+                    } else {
+                        sendDebugLog("ERR: Invalid BW");
+                    }
+                    // Reconfigure if currently listening to this protocol
+                    if (rx_protocol == targetProtocol) {
+                        configureProtocol(targetProtocol);
+                    }
                 } else {
-                    sendDebugLog("ERR: Invalid MeshCore freq");
-                }
-                // Validate bandwidth (0-9: 7.8kHz to 500kHz)
-                if (newBw <= 9) {
-                    meshcoreBandwidth = newBw;
-                    sendDebugLog("MeshCore BW updated");
-                } else {
-                    sendDebugLog("ERR: Invalid MeshCore BW");
-                }
-                // Reconfigure if currently listening to MeshCore
-                if (currentProtocol == LISTENING_MESHCORE) {
-                    configureForMeshCore();
+                    sendDebugLog("ERR: Invalid proto");
                 }
             }
             break;
             
-        case CMD_SET_MESHTASTIC_PARAMS:
-            if (len == 5) {
-                // 4 bytes frequency (little-endian) + 1 byte bandwidth
-                uint32_t newFreq = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
-                uint8_t newBw = data[4];
-                // Validate frequency (915 MHz ISM band: 902-928 MHz)
-                if (newFreq >= 902000000 && newFreq <= 928000000) {
-                    meshtasticFrequencyHz = newFreq;
-                    sendDebugLog("Meshtastic freq updated");
+        case CMD_SET_RX_PROTOCOL:
+            if (len == 1) {
+                // Set listen protocol: 1 byte protocol ID
+                ProtocolId rxProtocol = (ProtocolId)data[0];
+                if (rxProtocol < PROTOCOL_COUNT) {
+                    set_rx_protocol(rxProtocol);
+                    ProtocolInterfaceImpl* iface = protocol_interface_get(rxProtocol);
+                    if (iface != nullptr) {
+                        char msg[40];
+                        snprintf(msg, sizeof(msg), "RX: %s", iface->name);
+                        sendDebugLog(msg);
+                    }
                 } else {
-                    sendDebugLog("ERR: Invalid Meshtastic freq");
+                    sendDebugLog("ERR: Invalid RX proto");
                 }
-                // Validate bandwidth (0-9: 7.8kHz to 500kHz)
-                if (newBw <= 9) {
-                    meshtasticBandwidth = newBw;
-                    sendDebugLog("Meshtastic BW updated");
-                } else {
-                    sendDebugLog("ERR: Invalid Meshtastic BW");
+            }
+            break;
+            
+        case CMD_SET_TX_PROTOCOLS:
+            if (len == 1) {
+                // Set transmit protocols: 1 byte bitmask (bit 0=MeshCore, bit 1=Meshtastic)
+                uint8_t txBitmask = data[0];
+                set_tx_protocols(txBitmask);
+                
+                // Build status message safely
+                char msg[60];
+                int pos = snprintf(msg, sizeof(msg), "TX: ");
+                bool first = true;
+                for (uint8_t i = 0; i < tx_protocol_count && pos < (int)(sizeof(msg) - 20); i++) {
+                    ProtocolInterfaceImpl* iface = protocol_interface_get(tx_protocols[i]);
+                    if (iface != nullptr) {
+                        if (!first) {
+                            pos += snprintf(msg + pos, sizeof(msg) - pos, ", ");
+                        }
+                        pos += snprintf(msg + pos, sizeof(msg) - pos, "%s", iface->name);
+                        first = false;
+                    }
                 }
-                // Reconfigure if currently listening to Meshtastic
-                if (currentProtocol == LISTENING_MESHTASTIC) {
-                    configureForMeshtastic();
+                if (tx_protocol_count == 0) {
+                    snprintf(msg + pos, sizeof(msg) - pos, "None");
                 }
+                sendDebugLog(msg);
             }
             break;
             
@@ -276,17 +315,34 @@ void USBComm::sendInfo() {
     *p++ = 0x01; // Major
     *p++ = 0x00; // Minor
     
-    // MeshCore frequency (4 bytes, little-endian)
-    *p++ = (uint8_t)(meshcoreFrequencyHz & 0xFF);
-    *p++ = (uint8_t)((meshcoreFrequencyHz >> 8) & 0xFF);
-    *p++ = (uint8_t)((meshcoreFrequencyHz >> 16) & 0xFF);
-    *p++ = (uint8_t)((meshcoreFrequencyHz >> 24) & 0xFF);
+    // Get frequencies from protocol states dynamically
+    uint32_t firstFreq = 0;
+    uint32_t secondFreq = 0;
+    uint8_t firstBw = 0;
+    uint8_t secondBw = 0;
     
-    // Meshtastic frequency (4 bytes, little-endian)
-    *p++ = (uint8_t)(meshtasticFrequencyHz & 0xFF);
-    *p++ = (uint8_t)((meshtasticFrequencyHz >> 8) & 0xFF);
-    *p++ = (uint8_t)((meshtasticFrequencyHz >> 16) & 0xFF);
-    *p++ = (uint8_t)((meshtasticFrequencyHz >> 24) & 0xFF);
+    if (protocolStates != nullptr) {
+        if (PROTOCOL_COUNT > PROTOCOL_MESHCORE) {
+            firstFreq = protocolStates[PROTOCOL_MESHCORE].config.frequencyHz;
+            firstBw = protocolStates[PROTOCOL_MESHCORE].config.bandwidth;
+        }
+        if (PROTOCOL_COUNT > PROTOCOL_MESHTASTIC) {
+            secondFreq = protocolStates[PROTOCOL_MESHTASTIC].config.frequencyHz;
+            secondBw = protocolStates[PROTOCOL_MESHTASTIC].config.bandwidth;
+        }
+    }
+    
+    // First protocol frequency (4 bytes, little-endian)
+    *p++ = (uint8_t)(firstFreq & 0xFF);
+    *p++ = (uint8_t)((firstFreq >> 8) & 0xFF);
+    *p++ = (uint8_t)((firstFreq >> 16) & 0xFF);
+    *p++ = (uint8_t)((firstFreq >> 24) & 0xFF);
+    
+    // Second protocol frequency (4 bytes, little-endian)
+    *p++ = (uint8_t)(secondFreq & 0xFF);
+    *p++ = (uint8_t)((secondFreq >> 8) & 0xFF);
+    *p++ = (uint8_t)((secondFreq >> 16) & 0xFF);
+    *p++ = (uint8_t)((secondFreq >> 24) & 0xFF);
     
     // Switch interval (2 bytes, little-endian)
     *p++ = (uint8_t)(protocolSwitchIntervalMs & 0xFF);
@@ -294,9 +350,9 @@ void USBComm::sendInfo() {
     
     // Current protocol and bandwidths
     *p++ = currentProtocol;
-    *p++ = meshcoreBandwidth;
-    *p++ = meshtasticBandwidth;
-    *p++ = desiredProtocolMode; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
+    *p++ = firstBw;
+    *p++ = secondBw;
+    *p++ = desiredProtocolMode; // 0=First protocol, 1=Second protocol, 2=Auto-Switch
     *p++ = 0; // Reserved
     
     sendResponse(RESP_INFO_REPLY, info, 18);
@@ -313,6 +369,27 @@ void USBComm::sendStats() {
         *p++ = (uint8_t)(((val) >> 8) & 0xFF); \
         *p++ = (uint8_t)(((val) >> 16) & 0xFF); \
         *p++ = (uint8_t)(((val) >> 24) & 0xFF);
+    
+    // Get stats from protocol state objects dynamically
+    // For backward compatibility, send stats for first two protocols
+    uint32_t meshcoreRxCount = (protocolStates != nullptr && PROTOCOL_COUNT > PROTOCOL_MESHCORE) ? 
+        protocolStates[PROTOCOL_MESHCORE].stats.rxCount : 0;
+    uint32_t meshtasticRxCount = (protocolStates != nullptr && PROTOCOL_COUNT > PROTOCOL_MESHTASTIC) ? 
+        protocolStates[PROTOCOL_MESHTASTIC].stats.rxCount : 0;
+    uint32_t meshcoreTxCount = (protocolStates != nullptr && PROTOCOL_COUNT > PROTOCOL_MESHCORE) ? 
+        protocolStates[PROTOCOL_MESHCORE].stats.txCount : 0;
+    uint32_t meshtasticTxCount = (protocolStates != nullptr && PROTOCOL_COUNT > PROTOCOL_MESHTASTIC) ? 
+        protocolStates[PROTOCOL_MESHTASTIC].stats.txCount : 0;
+    
+    // Aggregate errors across all protocols
+    uint32_t conversionErrors = 0;
+    uint32_t parseErrors = 0;
+    if (protocolStates != nullptr) {
+        for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+            conversionErrors += protocolStates[id].stats.conversionErrors;
+            parseErrors += protocolStates[id].stats.parseErrors;
+        }
+    }
     
     PACK_U32(meshcoreRxCount);
     PACK_U32(meshtasticRxCount);

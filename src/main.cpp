@@ -1,52 +1,42 @@
 #include <Arduino.h>
 #include <string.h>
-#include "config.h"
-#include "sx1276.h"
-#include "meshcore_handler.h"
-#include "meshtastic_handler.h"
+#include "config.h"  // Generic config (PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT)
+#include "protocols/protocol_state.h"
+#include "radio/radio_interface.h"
+#include "protocols/protocol_interface.h"
+#include "protocols/protocol_manager.h"
+#include "protocols/canonical_packet.h"
+#include "platforms/platform_interface.h"
 #include "usb_comm.h"
 
-// Protocol state enum (must match usb_comm.cpp)
-enum ProtocolState {
-    LISTENING_MESHCORE,
-    LISTENING_MESHTASTIC
-};
-
 // Global state variables (accessible from usb_comm.cpp)
-ProtocolState currentProtocol = LISTENING_MESHCORE;
+ProtocolId rx_protocol = PROTOCOL_MESHCORE;      // Currently listening protocol
+ProtocolId tx_protocols[PROTOCOL_COUNT];         // Protocols to transmit to (relay targets)
+uint8_t tx_protocol_count = 0;                   // Number of active transmit protocols
 unsigned long lastProtocolSwitch = 0;
-uint16_t protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT; // Configurable switch interval
-bool autoSwitchEnabled = true; // Enable/disable automatic protocol switching
+uint16_t protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
+bool autoSwitchEnabled = true;
 uint8_t desiredProtocolMode = 2; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
 
-// Configurable LoRa parameters
-uint32_t meshcoreFrequencyHz = DEFAULT_FREQUENCY_HZ;
-uint8_t meshcoreBandwidth = MESHCORE_BW;
-uint32_t meshtasticFrequencyHz = MESHTASTIC_FREQUENCY_HZ;
-uint8_t meshtasticBandwidth = MESHTASTIC_BW;
+// Legacy ProtocolState for USB comm compatibility
+ProtocolState currentProtocol = LISTENING_MESHCORE;
+
+// Protocol runtime state objects (one per protocol) - accessible from usb_comm.cpp
+ProtocolRuntimeState protocolStates[PROTOCOL_COUNT];
+
+// Protocol configurations are now stored in protocolStates[].config
+// Legacy variables removed - access via protocolStates[id].config.frequencyHz/bandwidth
 
 // Packet buffers - use single shared buffer to save RAM
-// Since we only process one packet at a time, we can reuse buffers
-uint8_t rxBuffer[MAX_MESHCORE_PACKET_SIZE];
-uint8_t txBuffer[MAX_MESHTASTIC_PACKET_SIZE];
-uint8_t convertedBuffer[MAX_MESHCORE_PACKET_SIZE];
-
-// Statistics
-// Using uint32_t (max 4,294,967,295) - add overflow protection
-uint32_t meshcoreRxCount = 0;
-uint32_t meshtasticRxCount = 0;
-uint32_t meshcoreTxCount = 0;
-uint32_t meshtasticTxCount = 0;
-uint32_t conversionErrors = 0;
-uint32_t parseErrors = 0; // Separate counter for parse failures
+uint8_t rxBuffer[255];
+uint8_t txBuffer[255];
+uint8_t convertedBuffer[255];
 
 // Helper to safely increment counters with overflow protection
-// Cap at max safe value to prevent wraparound to negative when interpreted as signed
 #define SAFE_INCREMENT(counter) do { \
     if (counter < 2147483647U) { \
         counter++; \
     } else { \
-        /* Overflow protection - cap at max safe value (2^31 - 1) */ \
         counter = 2147483647U; \
         static bool overflowLogged = false; \
         if (!overflowLogged) { \
@@ -63,518 +53,375 @@ void onPacketReceived() {
     packetReceived = true;
 }
 
-void configureForMeshCore() {
-    sx1276_setMode(MODE_STDBY);
-    delay(10);
-    sx1276_setFrequency(meshcoreFrequencyHz);
-    sx1276_setBandwidth(meshcoreBandwidth);
-    sx1276_setSpreadingFactor(MESHCORE_SF);
-    sx1276_setCodingRate(MESHCORE_CR);
-    sx1276_setSyncWord(MESHCORE_SYNC_WORD);
-    sx1276_setPreambleLength(MESHCORE_PREAMBLE);
-    sx1276_setHeaderMode(true); // Implicit header mode
-    sx1276_setInvertIQ(false); // MeshCore uses normal IQ
-    sx1276_setCrc(true); // Enable CRC
-    delay(10);
-    sx1276_setMode(MODE_RX_CONTINUOUS);
+void configureProtocol(ProtocolId protocol) {
+    ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
+    ProtocolConfig* config = protocol_manager_getConfig(protocol);
+    
+    if (iface && config) {
+        iface->configure(config);
+        protocolStates[protocol].isActive = true;
+    }
 }
 
-void configureForMeshtastic() {
-    sx1276_setMode(MODE_STDBY);
-    delay(10);
-    sx1276_setFrequency(meshtasticFrequencyHz);
-    sx1276_setBandwidth(meshtasticBandwidth);
-    sx1276_setSpreadingFactor(MESHTASTIC_SF);
-    sx1276_setCodingRate(MESHTASTIC_CR);
-    sx1276_setSyncWord(MESHTASTIC_SYNC_WORD);
-    sx1276_setPreambleLength(MESHTASTIC_PREAMBLE);
-    sx1276_setHeaderMode(true); // Implicit header mode
-    sx1276_setInvertIQ(true); // Meshtastic uses inverted IQ
-    sx1276_setCrc(true); // Enable CRC
-    delay(10);
-    sx1276_setMode(MODE_RX_CONTINUOUS);
+void update_tx_protocols(ProtocolId rx_protocol) {
+    // With canonical format, we can relay to all other protocols
+    tx_protocol_count = 0;
+    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+        if (id != rx_protocol) {
+            tx_protocols[tx_protocol_count++] = id;
+        }
+    }
+}
+
+void set_tx_protocols(uint8_t bitmask) {
+    // Set transmit protocols from bitmask (bit 0 = MeshCore, bit 1 = Meshtastic)
+    tx_protocol_count = 0;
+    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+        uint8_t bit = (uint8_t)id;
+        if ((bitmask >> bit) & 0x01) {
+            // Don't allow transmitting to the same protocol we're listening to
+            if (id != rx_protocol) {
+                tx_protocols[tx_protocol_count++] = id;
+            }
+        }
+    }
+}
+
+void set_rx_protocol(ProtocolId protocol) {
+    // Set the listen protocol and update transmit protocols
+    rx_protocol = protocol;
+    currentProtocol = (ProtocolState)protocol;
+    
+    // Update transmit protocol list (exclude listen protocol)
+    update_tx_protocols(rx_protocol);
+    
+    // Configure radio for new listen protocol
+    configureProtocol(protocol);
+    lastProtocolSwitch = millis();
 }
 
 bool receivePacket(uint8_t* buffer, uint8_t* len) {
-    // Check if packet was received
-    uint8_t irqFlags = sx1276_readRegister(REG_IRQ_FLAGS);
-    if (!(irqFlags & IRQ_RX_DONE_MASK)) {
+    if (!radio_isPacketReceived()) {
         return false;
     }
     
-    // Get packet length
-    *len = sx1276_getPacketLength();
-    if (*len == 0 || *len > MAX_MESHCORE_PACKET_SIZE) {
-        sx1276_clearIrqFlags();
-        sx1276_setMode(MODE_RX_CONTINUOUS);
+    *len = radio_getPacketLength();
+    ProtocolInterfaceImpl* currentIface = protocol_interface_get(rx_protocol);
+    
+    if (*len == 0 || (currentIface && *len > currentIface->getMaxPacketSize())) {
+        radio_clearIrqFlags();
+        radio_setMode(MODE_RX_CONTINUOUS);
         return false;
     }
     
-    // Read packet from FIFO
-    sx1276_readFifo(buffer, *len);
-    sx1276_clearIrqFlags();
+    radio_readFifo(buffer, *len);
+    radio_clearIrqFlags();
     
     return true;
 }
 
-bool transmitPacket(const uint8_t* data, uint8_t len) {
-    if (len == 0 || len > MAX_MESHTASTIC_PACKET_SIZE) {
+bool transmitPacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
+    if (len == 0 || len > 255) {
         return false;
     }
     
-    // Ensure we're in standby mode
-    sx1276_setMode(MODE_STDBY);
-    delay(20); // Allow mode change to settle
+    // Configure radio for target protocol
+    configureProtocol(protocol);
+    delay(20);
     
-    // Set power to maximum for transmission
-    sx1276_setPower(17); // Max power (17 dBm)
+    radio_setPower(platform_getMaxTxPower());
+    radio_setCrc(true);
     
-    // Ensure CRC is enabled for transmission
-    sx1276_setCrc(true);
+    radio_writeFifo((uint8_t*)data, len);
+    radio_clearIrqFlags();
+    radio_setMode(MODE_TX);
+    delay(5);
     
-    // Write packet to FIFO (this also sets payload length and FIFO pointer)
-    sx1276_writeFifo((uint8_t*)data, len);
-    
-    // Clear all IRQ flags before starting TX
-    sx1276_clearIrqFlags();
-    
-    // Configure DIO0 for TX_DONE interrupt (bit 6-7 = 00 means DIO0 = TxDone)
-    sx1276_writeRegister(REG_DIO_MAPPING_1, 0x00);
-    
-    // Start transmission
-    sx1276_setMode(MODE_TX);
-    delay(5); // Small delay to allow mode change
-    
-    // Verify we're in TX mode
-    uint8_t opMode = sx1276_readRegister(REG_OP_MODE);
-    if ((opMode & 0x07) != MODE_TX) {
-        // Failed to enter TX mode
-        sx1276_setMode(MODE_STDBY);
-        delay(10);
-        return false;
-    }
-    
-    // Wait for transmission to complete (with timeout)
-    // TX typically takes 10-100ms depending on packet size and SF
+    // Wait for transmission to complete
     unsigned long startTime = millis();
-    uint8_t irqFlags = 0;
-    while (true) {
-        irqFlags = sx1276_readRegister(REG_IRQ_FLAGS);
-        if (irqFlags & IRQ_TX_DONE_MASK) {
-            break; // Transmission complete
-        }
-        if (millis() - startTime > 5000) {
-            // Timeout - return to standby
-            sx1276_setMode(MODE_STDBY);
-            delay(10);
-            // Don't send error here - this function is called frequently and errors would spam
-            return false;
-        }
-        delay(1); // Small delay in loop
+    while (millis() - startTime < 200) {
+        delay(1);
+    }
+    if (millis() - startTime > 5000) {
+        radio_setMode(MODE_STDBY);
+        delay(10);
+        return false;
     }
     
-    // Clear flags and return to standby
-    sx1276_clearIrqFlags();
-    sx1276_setMode(MODE_STDBY);
-    delay(10); // Small delay before switching modes
+    radio_clearIrqFlags();
+    radio_setMode(MODE_STDBY);
+    delay(10);
     
     return true;
 }
 
-void handleMeshCorePacket(uint8_t* data, uint8_t len) {
-    SAFE_INCREMENT(meshcoreRxCount);
+void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
+    ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
+    ProtocolRuntimeState* state = &protocolStates[protocol];
     
-    MeshCorePacket meshcorePacket;
-    if (!meshcore_parsePacket(data, len, &meshcorePacket)) {
-        SAFE_INCREMENT(parseErrors);
-        // Send concise error message to save RAM
-        if (len > 0) {
-            char errorMsg[40];
-            snprintf(errorMsg, sizeof(errorMsg), "ERR: MC parse fail len=%d", len);
-            usbComm.sendDebugLog(errorMsg);
-        } else {
-            usbComm.sendDebugLog("ERR: MC empty");
-        }
+    if (iface == nullptr || state == nullptr || iface->convertToCanonical == nullptr) {
         return;
     }
     
-    // Convert to Meshtastic format
-    uint8_t convertedLen = 0;
-    if (!meshcore_convertToMeshtastic(&meshcorePacket, txBuffer, &convertedLen)) {
-        SAFE_INCREMENT(conversionErrors);
-        usbComm.sendDebugLog("ERR: MC->MT conv fail");
-        return;
-    }
-    
-    // Switch to Meshtastic configuration
-    configureForMeshtastic();
-    delay(50); // Allow radio to settle
-    
-    // Transmit as Meshtastic packet
-    if (transmitPacket(txBuffer, convertedLen)) {
-        SAFE_INCREMENT(meshtasticTxCount);
-        digitalWrite(LED_PIN, HIGH);
-        delay(10);
-        digitalWrite(LED_PIN, LOW);
-    } else {
-        usbComm.sendDebugLog("ERR: MT TX fail");
-    }
-    
-    // Switch back to MeshCore listening
-    configureForMeshCore();
-}
-
-void handleMeshtasticPacket(uint8_t* data, uint8_t len) {
-    SAFE_INCREMENT(meshtasticRxCount);
-    
-    MeshtasticHeader header;
-    // Reuse convertedBuffer for payload parsing to save RAM (we'll copy to txBuffer before conversion)
-    uint8_t* payload = convertedBuffer; // Reuse buffer - will be overwritten during conversion
-    uint8_t payloadLen = 0;
-    
-    if (!meshtastic_parsePacket(data, len, &header, payload, &payloadLen)) {
-        SAFE_INCREMENT(parseErrors);
+    // Convert received packet to canonical format
+    CanonicalPacket canonical;
+    if (!iface->convertToCanonical(data, len, &canonical)) {
+        state->stats.parseErrors++;
         char errorMsg[40];
-        if (len < MESHTASTIC_HEADER_SIZE) {
-            snprintf(errorMsg, sizeof(errorMsg), "ERR: MT too short %d<%d", len, MESHTASTIC_HEADER_SIZE);
-        } else {
-            snprintf(errorMsg, sizeof(errorMsg), "ERR: MT parse fail len=%d", len);
-        }
+        snprintf(errorMsg, sizeof(errorMsg), "ERR: %s parse fail len=%d", iface->name, len);
         usbComm.sendDebugLog(errorMsg);
         return;
     }
     
-    // CRITICAL: Filter out MQTT-originated packets - MeshCore must not receive internet traffic
-    if (meshtastic_isViaMqtt(&header)) {
-        // Silently drop MQTT packets - don't convert or forward to MeshCore
-        return;
+    // Filter MQTT packets
+    if (canonical.viaMqtt) {
+        return;  // Silently drop MQTT packets
     }
     
-    // Convert to MeshCore format
-    uint8_t convertedLen = 0;
-    if (!meshtastic_convertToMeshCore(&header, payload, payloadLen, convertedBuffer, &convertedLen)) {
-        SAFE_INCREMENT(conversionErrors);
-        usbComm.sendDebugLog("ERR: MT->MC conv fail");
-        return;
+    state->stats.rxCount++;
+    
+    // Relay to all other protocols using canonical format
+    for (uint8_t i = 0; i < tx_protocol_count; i++) {
+        ProtocolId targetProtocol = tx_protocols[i];
+        ProtocolInterfaceImpl* targetIface = protocol_interface_get(targetProtocol);
+        
+        if (targetIface == nullptr || targetIface->convertFromCanonical == nullptr) {
+            continue;
+        }
+        
+        // Convert from canonical format to target protocol
+        uint8_t convertedLen = 0;
+        if (!targetIface->convertFromCanonical(&canonical, txBuffer, &convertedLen)) {
+            state->stats.conversionErrors++;
+            continue;
+        }
+        
+        // Transmit to target protocol
+        if (transmitPacket(targetProtocol, txBuffer, convertedLen)) {
+            ProtocolRuntimeState* targetState = &protocolStates[targetProtocol];
+            if (targetState != nullptr && targetIface->updateStats != nullptr) {
+                targetIface->updateStats(targetState, false, true, false, false);
+            }
+            platform_blinkLed(10);
+        } else {
+            usbComm.sendDebugLog("ERR: TX fail");
+        }
     }
     
-    // Switch to MeshCore configuration
-    configureForMeshCore();
-    delay(50); // Allow radio to settle
-    
-    // Transmit as MeshCore packet
-    if (transmitPacket(convertedBuffer, convertedLen)) {
-        SAFE_INCREMENT(meshcoreTxCount);
-        digitalWrite(LED_PIN, HIGH);
-        delay(10);
-        digitalWrite(LED_PIN, LOW);
-    } else {
-        usbComm.sendDebugLog("ERR: MC TX fail");
-    }
-    
-    // Switch back to Meshtastic listening
-    configureForMeshtastic();
+    // Switch back to listening protocol
+    configureProtocol(protocol);
 }
 
 void switchProtocol() {
-    // Only auto-switch if enabled and interval is not 0
     if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
         return;
     }
     
     unsigned long currentTime = millis();
-    
     if (currentTime - lastProtocolSwitch >= protocolSwitchIntervalMs) {
-        if (currentProtocol == LISTENING_MESHCORE) {
-            currentProtocol = LISTENING_MESHTASTIC;
-            configureForMeshtastic();
-        } else {
-            currentProtocol = LISTENING_MESHCORE;
-            configureForMeshCore();
-        }
+        // Rotate through all available protocols
+        ProtocolId nextProtocol = (ProtocolId)((rx_protocol + 1) % PROTOCOL_COUNT);
+        rx_protocol = nextProtocol;
+        
+        // Update legacy ProtocolState for USB comm compatibility
+        currentProtocol = (ProtocolState)rx_protocol;
+        
+        // Update transmit protocol list
+        update_tx_protocols(rx_protocol);
+        
+        // Configure radio for new listening protocol
+        configureProtocol(rx_protocol);
+        
         lastProtocolSwitch = currentTime;
     }
 }
 
 void setProtocol(ProtocolState protocol) {
-    if (protocol == LISTENING_MESHCORE) {
-        currentProtocol = LISTENING_MESHCORE;
-        configureForMeshCore();
-    } else {
-        currentProtocol = LISTENING_MESHTASTIC;
-        configureForMeshtastic();
-    }
-    lastProtocolSwitch = millis();
+    ProtocolId id = (ProtocolId)protocol;
+    set_rx_protocol(id);
 }
 
 void printStatistics() {
-    Serial.print("MeshCore RX: ");
-    Serial.print(meshcoreRxCount);
-    Serial.print(" | Meshtastic RX: ");
-    Serial.print(meshtasticRxCount);
-    Serial.print(" | MeshCore TX: ");
-    Serial.print(meshcoreTxCount);
-    Serial.print(" | Meshtastic TX: ");
-    Serial.print(meshtasticTxCount);
-    Serial.print(" | Errors: ");
-    Serial.println(conversionErrors);
+    uint32_t totalConversionErrors = 0;
+    uint32_t totalParseErrors = 0;
+    
+    // Build statistics string for debug log (sent via binary protocol, not Serial.print)
+    char statsBuffer[256];
+    int offset = 0;
+    
+    // Print statistics for each protocol dynamically
+    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+        ProtocolInterfaceImpl* iface = protocol_interface_get(id);
+        ProtocolRuntimeState* state = &protocolStates[id];
+        
+        if (iface != nullptr && state != nullptr) {
+            const char* name = iface->name ? iface->name : "Unknown";
+            
+            offset += snprintf(statsBuffer + offset, sizeof(statsBuffer) - offset, 
+                "%s RX: %lu TX: %lu", name, state->stats.rxCount, state->stats.txCount);
+            
+            if (id < PROTOCOL_COUNT - 1) {
+                offset += snprintf(statsBuffer + offset, sizeof(statsBuffer) - offset, " | ");
+            }
+            
+            totalConversionErrors += state->stats.conversionErrors;
+            totalParseErrors += state->stats.parseErrors;
+        }
+    }
+    
+    snprintf(statsBuffer + offset, sizeof(statsBuffer) - offset,
+        " | Errors: %lu (Conv: %lu, Parse: %lu)",
+        totalConversionErrors + totalParseErrors, totalConversionErrors, totalParseErrors);
+    
+    // Send via USB comm binary protocol instead of Serial.print to avoid interfering with protocol
+    usbComm.sendDebugLog(statsBuffer);
 }
 
-// Generate a test MeshCore packet (broadcast text message)
-uint8_t generateMeshCoreTestPacket(uint8_t* buffer, uint8_t* len) {
-    const char* testMsg = "MeshCore Test";
-    uint8_t msgLen = strlen(testMsg);
+void sendTestMessage(ProtocolId protocol) {
+    ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
+    if (iface == nullptr || iface->generateTestPacket == nullptr) {
+        return;
+    }
     
-    uint8_t i = 0;
-    
-    // Header: FLOOD (0x01) | TXT_MSG (0x02 << 2) | VER_1 (0x00 << 6)
-    buffer[i++] = 0x01 | (0x02 << 2) | (0x00 << 6);
-    
-    // No transport codes for FLOOD
-    // Path length: 0 for broadcast
-    buffer[i++] = 0;
-    
-    // Payload: text message
-    memcpy(&buffer[i], testMsg, msgLen);
-    i += msgLen;
-    
-    *len = i;
-    return i;
-}
-
-// Generate a test Meshtastic packet (broadcast message)
-uint8_t generateMeshtasticTestPacket(uint8_t* buffer, uint8_t* len) {
-    const char* testMsg = "Meshtastic Test";
-    uint8_t msgLen = strlen(testMsg);
-    
-    MeshtasticHeader* header = (MeshtasticHeader*)buffer;
-    
-    // Broadcast header
-    header->to = 0xFFFFFFFF;      // Broadcast (little-endian)
-    header->from = 0x00000001;    // Proxy node ID (little-endian)
-    header->id = 0x00000001;      // Packet ID (little-endian)
-    header->flags = 0x03;         // Hop limit = 3, want_ack=0, via_mqtt=0, hop_start=0
-    header->channel = 0;          // Default channel hash (0 for default/primary channel)
-    header->next_hop = 0;
-    header->relay_node = 0;
-    
-    // Payload: simple text message (normally this would be protobuf-encoded and encrypted)
-    // For testing, we send raw text - nodes may not decode it but should see the packet
-    memcpy(&buffer[MESHTASTIC_HEADER_SIZE], testMsg, msgLen);
-    
-    *len = MESHTASTIC_HEADER_SIZE + msgLen;
-    return *len;
-}
-
-void sendTestMessage(uint8_t protocol) {
     uint8_t testBuffer[64];
     uint8_t testLen = 0;
     char debugMsg[64];
     
-    if (protocol == 0) {
-        // Send MeshCore test message
-        generateMeshCoreTestPacket(testBuffer, &testLen);
-        
-        // Configure radio for MeshCore
-        sx1276_setMode(MODE_STDBY);
-        delay(20);
-        sx1276_setFrequency(meshcoreFrequencyHz);
-        sx1276_setBandwidth(meshcoreBandwidth);
-        sx1276_setSpreadingFactor(MESHCORE_SF);
-        sx1276_setCodingRate(MESHCORE_CR);
-        sx1276_setSyncWord(MESHCORE_SYNC_WORD);
-        sx1276_setPreambleLength(MESHCORE_PREAMBLE);
-        sx1276_setHeaderMode(true); // Implicit header mode
-        sx1276_setInvertIQ(false); // MeshCore uses normal IQ
-        sx1276_setCrc(true); // Enable CRC
-        delay(20);
-        
-        snprintf(debugMsg, sizeof(debugMsg), "TX MeshCore: %d bytes @ %.3f MHz", testLen, meshcoreFrequencyHz / 1000000.0);
-        usbComm.sendDebugLog(debugMsg);
-        
-        // Verify radio is configured correctly before TX
-        uint8_t syncWord = sx1276_readRegister(REG_SYNC_WORD);
-        uint8_t opMode = sx1276_readRegister(REG_OP_MODE);
-        char verifyMsg[80];
-        snprintf(verifyMsg, sizeof(verifyMsg), "Pre-TX: sync=0x%02X mode=0x%02X", syncWord, opMode);
-        usbComm.sendDebugLog(verifyMsg);
-        
-        if (transmitPacket(testBuffer, testLen)) {
-            SAFE_INCREMENT(meshcoreTxCount);
-            digitalWrite(LED_PIN, HIGH);
-            delay(50);
-            digitalWrite(LED_PIN, LOW);
-            usbComm.sendDebugLog("MeshCore test TX success");
-        } else {
-            usbComm.sendDebugLog("MeshCore test TX failed - check radio config");
+    iface->generateTestPacket(testBuffer, &testLen);
+    
+    ProtocolConfig* config = protocol_manager_getConfig(protocol);
+    snprintf(debugMsg, sizeof(debugMsg), "TX %s: %d bytes @ %.3f MHz", 
+             iface->name, testLen, config->frequencyHz / 1000000.0);
+    usbComm.sendDebugLog(debugMsg);
+    
+    if (transmitPacket(protocol, testBuffer, testLen)) {
+        ProtocolRuntimeState* state = &protocolStates[protocol];
+        if (state != nullptr && iface->updateStats != nullptr) {
+            iface->updateStats(state, false, true, false, false);
         }
-        
-        // Return to listening mode
-        configureForMeshCore();
+        platform_blinkLed(50);
+        usbComm.sendDebugLog("Test TX success");
     } else {
-        // Send Meshtastic test message
-        generateMeshtasticTestPacket(testBuffer, &testLen);
-        
-        // Configure radio for Meshtastic
-        sx1276_setMode(MODE_STDBY);
-        delay(20);
-        sx1276_setFrequency(meshtasticFrequencyHz);
-        sx1276_setBandwidth(meshtasticBandwidth);
-        sx1276_setSpreadingFactor(MESHTASTIC_SF);
-        sx1276_setCodingRate(MESHTASTIC_CR);
-        sx1276_setSyncWord(MESHTASTIC_SYNC_WORD);
-        sx1276_setPreambleLength(MESHTASTIC_PREAMBLE);
-        sx1276_setHeaderMode(true); // Implicit header mode
-        sx1276_setInvertIQ(true); // Meshtastic uses inverted IQ
-        sx1276_setCrc(true); // Enable CRC
-        delay(20);
-        
-        snprintf(debugMsg, sizeof(debugMsg), "TX Meshtastic: %d bytes @ %.3f MHz", testLen, meshtasticFrequencyHz / 1000000.0);
-        usbComm.sendDebugLog(debugMsg);
-        
-        // Verify radio is configured correctly before TX
-        uint8_t syncWord = sx1276_readRegister(REG_SYNC_WORD);
-        uint8_t opMode = sx1276_readRegister(REG_OP_MODE);
-        uint8_t invertIQ = sx1276_readRegister(REG_INVERT_IQ);
-        char verifyMsg[80];
-        snprintf(verifyMsg, sizeof(verifyMsg), "Pre-TX: sync=0x%02X mode=0x%02X IQ=0x%02X", syncWord, opMode, invertIQ);
-        usbComm.sendDebugLog(verifyMsg);
-        
-        if (transmitPacket(testBuffer, testLen)) {
-            SAFE_INCREMENT(meshtasticTxCount);
-            digitalWrite(LED_PIN, HIGH);
-            delay(50);
-            digitalWrite(LED_PIN, LOW);
-            usbComm.sendDebugLog("Meshtastic test TX success");
-        } else {
-            usbComm.sendDebugLog("Meshtastic test TX failed - check radio config");
-        }
-        
-        // Return to listening mode
-        configureForMeshtastic();
+        usbComm.sendDebugLog("Test TX failed");
     }
+    
+    // Switch back to listening protocol
+    configureProtocol(rx_protocol);
 }
 
 void setup() {
-    Serial.begin(SERIAL_BAUD);
-    delay(2000); // Wait for serial to initialize
+    // Platform-specific initialization (LED, USB Serial, etc.)
+    platform_init();
+    
+    // Initialize USB Serial (platform-specific config)
+    Serial.begin(platform_getSerialBaud());
+    delay(2000);
     
     Serial.println("MeshCore-Meshtastic Proxy Starting...");
     
-    // Initialize LED
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LOW);
-    
-    // Initialize USB communication
     usbComm.init();
     
-    // Initialize SX1276
-    if (!sx1276_init()) {
-        Serial.println("ERROR: SX1276 initialization failed!");
-        usbComm.sendDebugLog("ERR: SX1276 init failed - check SPI connections");
+    if (!radio_init()) {
+        Serial.println("ERROR: Radio initialization failed!");
+        usbComm.sendDebugLog("ERR: Radio init failed - check SPI connections");
         while(1) {
-            digitalWrite(LED_PIN, HIGH);
-            delay(100);
-            digitalWrite(LED_PIN, LOW);
-            delay(100);
+            platform_blinkLed(100);
         }
     }
     
-    Serial.println("SX1276 initialized successfully");
+    Serial.println("Radio initialized successfully");
+    radio_attachInterrupt(onPacketReceived);
     
-    // Attach interrupt
-    sx1276_attachInterrupt(onPacketReceived);
+    // Initialize protocol manager
+    protocol_manager_init();
     
-    // Initialize configurable parameters
-    meshcoreFrequencyHz = DEFAULT_FREQUENCY_HZ;
-    meshcoreBandwidth = MESHCORE_BW;
-    meshtasticFrequencyHz = MESHTASTIC_FREQUENCY_HZ;
-    meshtasticBandwidth = MESHTASTIC_BW;
+    // Initialize protocol states dynamically
+    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+        protocol_interface_initState(id, &protocolStates[id]);
+    }
+    
+    // Initialize listen protocol (default to first available protocol)
+    rx_protocol = PROTOCOL_MESHCORE;  // Default to first protocol
+    currentProtocol = (ProtocolState)rx_protocol;
+    update_tx_protocols(rx_protocol);
+    
+    // Protocol configs are stored in protocolStates[].config and can be accessed
+    // via protocol_manager_getConfig() or directly from protocolStates[]
+    
     protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
     autoSwitchEnabled = true;
-    desiredProtocolMode = 2; // Default to auto-switch
+    desiredProtocolMode = 2;
     
-    // Start listening for MeshCore packets
-    configureForMeshCore();
-    currentProtocol = LISTENING_MESHCORE;
+    // Configure radio for listen protocol
+    configureProtocol(rx_protocol);
     lastProtocolSwitch = millis();
     
+    // Print protocol information dynamically
     Serial.println("Proxy ready. Listening for packets...");
-    Serial.print("MeshCore Frequency: ");
-    Serial.print(DEFAULT_FREQUENCY_HZ / 1000000.0);
-    Serial.println(" MHz");
-    Serial.print("Meshtastic Frequency: ");
-    Serial.print(MESHTASTIC_FREQUENCY_HZ / 1000000.0);
-    Serial.println(" MHz");
+    Serial.println("Configured protocols:");
+    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+        ProtocolInterfaceImpl* iface = protocol_interface_get(id);
+        ProtocolConfig* config = protocol_manager_getConfig(id);
+        
+        if (iface != nullptr && config != nullptr) {
+            Serial.print("  ");
+            Serial.print(iface->name);
+            Serial.print(" @ ");
+            Serial.print(config->frequencyHz / 1000000.0);
+            Serial.println(" MHz");
+        }
+    }
     
-    // Send startup test messages after a short delay
     delay(1000);
-    sendTestMessage(0); // MeshCore
-    delay(500);
-    sendTestMessage(1); // Meshtastic
+    // Send test messages for all transmit protocols (relay targets)
+    for (uint8_t i = 0; i < tx_protocol_count; i++) {
+        sendTestMessage(tx_protocols[i]);
+        delay(500);
+    }
 }
 
 void loop() {
-    // Process USB commands
     usbComm.process();
     
-    // Enforce protocol mode if auto-switch is disabled
     if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
-        // Manual mode - ensure protocol matches desired mode
-        if (desiredProtocolMode == 0 && currentProtocol != LISTENING_MESHCORE) {
-            setProtocol(LISTENING_MESHCORE);
-        } else if (desiredProtocolMode == 1 && currentProtocol != LISTENING_MESHTASTIC) {
-            setProtocol(LISTENING_MESHTASTIC);
+        // Manual mode - enforce desired protocol
+        ProtocolId desiredId = (desiredProtocolMode == 0) ? PROTOCOL_MESHCORE : 
+                               (desiredProtocolMode == 1) ? PROTOCOL_MESHTASTIC : rx_protocol;
+        
+        if (rx_protocol != desiredId) {
+            setProtocol((ProtocolState)desiredId);
         }
     } else {
-        // Auto-switch mode - time-slice between protocols
+        // Auto-switch mode - rotate through protocols
         switchProtocol();
     }
     
-    // Check for received packet
     if (packetReceived) {
         packetReceived = false;
         
         uint8_t packetLen = 0;
         if (receivePacket(rxBuffer, &packetLen)) {
-            // Get RSSI and SNR before processing
-            int16_t rssi = sx1276_getRssi();
-            int8_t snr = sx1276_getSnr();
+            int16_t rssi = radio_getRssi();
+            int8_t snr = radio_getSnr();
             
-            if (currentProtocol == LISTENING_MESHCORE) {
-                // Send packet info to USB before conversion
-                usbComm.sendRxPacket(0, rssi, snr, rxBuffer, packetLen);
-                handleMeshCorePacket(rxBuffer, packetLen);
-            } else {
-                // Send packet info to USB before conversion
-                usbComm.sendRxPacket(1, rssi, snr, rxBuffer, packetLen);
-                handleMeshtasticPacket(rxBuffer, packetLen);
-            }
+            usbComm.sendRxPacket(rx_protocol, rssi, snr, rxBuffer, packetLen);
+            handlePacket(rx_protocol, rxBuffer, packetLen);
             
-            // CRITICAL FIX: Restart RX mode after successful packet read (like MeshCore does)
-            // After reading FIFO, SX1276 needs RX mode restarted to receive next packet
-            sx1276_setMode(MODE_RX_CONTINUOUS);
+            radio_setMode(MODE_RX_CONTINUOUS);
         } else {
-            // Restart receive mode if packet read failed
-            if (currentProtocol == LISTENING_MESHCORE) {
-                configureForMeshCore();
-            } else {
-                configureForMeshtastic();
-            }
+            configureProtocol(rx_protocol);
         }
     }
     
-    // Also check IRQ flags directly (in case interrupt didn't fire)
-    if (sx1276_isPacketReceived()) {
+    if (radio_isPacketReceived()) {
         packetReceived = true;
     }
     
-    // Print statistics every 10 seconds
     static unsigned long lastStatsPrint = 0;
     if (millis() - lastStatsPrint > 10000) {
         printStatistics();
         lastStatsPrint = millis();
     }
     
-    delay(1); // Small delay to prevent tight loop
+    delay(1);
 }

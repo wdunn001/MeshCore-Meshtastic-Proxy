@@ -1,6 +1,5 @@
 #include "meshtastic_handler.h"
-#include "meshcore_handler.h"  // For PH_TYPE_SHIFT and PH_VER_SHIFT
-#include "config.h"
+#include "../meshcore/meshcore_handler.h"  // For PH_TYPE_SHIFT and PH_VER_SHIFT
 #include <string.h>
 
 bool meshtastic_parsePacket(const uint8_t* data, uint8_t len, MeshtasticHeader* header, uint8_t* payload, uint8_t* payloadLen) {

@@ -2,29 +2,34 @@
 
 class App {
     constructor() {
+        // Initialize protocol state arrays
+        const protocolState = {};
+        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            protocolState[i] = {
+                freq: i === 0 ? 910525000 : 906875000, // Default frequencies
+                bandwidth: i === 0 ? 6 : 8, // Default bandwidths
+                rx: 0,
+                tx: 0,
+                lastRxTime: null
+            };
+        }
+        
         this.state = {
             connected: false,
-            meshcoreFreq: 910525000,
-            meshtasticFreq: 906875000,
-            currentProtocol: 0,
+            protocols: protocolState, // Generic protocol state array
+            rx_protocol: 0, // Current listen protocol
+            tx_protocols: [], // Array of transmit protocol IDs
+            currentProtocol: 0, // Legacy compatibility
             switchInterval: 100,
-            meshcoreBandwidth: 6,
-            meshtasticBandwidth: 8,
-            meshcoreRx: 0,
-            meshtasticRx: 0,
-            meshcoreTx: 0,
-            meshtasticTx: 0,
             conversionErrors: 0,
             lastPacket: null,
-            meshcoreLastRxTime: null,
-            meshtasticLastRxTime: null,
             lastActivityTime: null,
             protocolSwitches: 0,
             lastProtocol: null,
             connectionStartTime: null,
-            firmwareInfoLogged: false, // Track if we've logged firmware info
-            controlsFormDirty: false, // Track if controls form has unsaved changes
-            infoReceived: false // Track if we've received device info response
+            firmwareInfoLogged: false,
+            controlsFormDirty: false,
+            infoReceived: false
         };
         
         this.statsInterval = null;
@@ -42,6 +47,9 @@ class App {
         // Initial UI state
         window.UI.updateConnectionStatus(false);
         window.UI.enableButtons(false);
+        
+        // Initialize control visibility
+        this.updateControlVisibility();
     }
 
     setupEventListeners() {
@@ -61,8 +69,21 @@ class App {
         // Mark form as dirty when controls are edited
         document.getElementById('protocolSelect').addEventListener('change', () => {
             this.state.controlsFormDirty = true;
-            this.updateIntervalInputState();
+            this.updateControlVisibility();
         });
+        document.getElementById('listenProtocolSelect').addEventListener('change', () => {
+            this.state.controlsFormDirty = true;
+            this.updateTransmitProtocolsFromListen();
+        });
+        // Setup transmit protocol checkbox listeners dynamically
+        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox) {
+                checkbox.addEventListener('change', () => {
+                    this.state.controlsFormDirty = true;
+                });
+            }
+        }
         document.getElementById('switchIntervalInput').addEventListener('input', () => {
             this.state.controlsFormDirty = true;
         });
@@ -107,8 +128,8 @@ class App {
             // Also request stats immediately to get packet counts
             await window.serialComm.getStats();
             
-            // Update interval input state after connection
-            this.updateIntervalInputState();
+            // Update control visibility after connection
+            this.updateControlVisibility();
             
             // Start stats polling
             this.startStatsPolling();
@@ -219,24 +240,24 @@ class App {
         const now = Date.now();
         
         // Update protocol activity based on recent packet activity (within last 30 seconds)
-        const meshcoreRecent = this.state.meshcoreLastRxTime && (now - this.state.meshcoreLastRxTime) < 30000;
-        const meshtasticRecent = this.state.meshtasticLastRxTime && (now - this.state.meshtasticLastRxTime) < 30000;
-        const meshcoreActive = this.state.meshcoreRx > 0 || this.state.meshcoreTx > 0;
-        const meshtasticActive = this.state.meshtasticRx > 0 || this.state.meshtasticTx > 0;
+        const protocolActivity = {};
+        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const proto = this.state.protocols[i];
+            const recent = proto.lastRxTime && (now - proto.lastRxTime) < 30000;
+            const active = proto.rx > 0 || proto.tx > 0;
+            protocolActivity[i] = active && (recent || proto.rx > 0);
+            
+            // Update last packet times
+            if (proto.lastRxTime) {
+                window.UI.updateLastPacketTime(i, proto.lastRxTime);
+            }
+        }
         
         // Show as receiving if packets were received recently OR if there's been any activity
         window.UI.updateProtocolActivity(
-            meshcoreActive && (meshcoreRecent || this.state.meshcoreRx > 0), 
-            meshtasticActive && (meshtasticRecent || this.state.meshtasticRx > 0)
+            protocolActivity[0] || false,
+            protocolActivity[1] || false
         );
-        
-        // Update last packet times
-        if (this.state.meshcoreLastRxTime) {
-            window.UI.updateLastPacketTime(0, this.state.meshcoreLastRxTime);
-        }
-        if (this.state.meshtasticLastRxTime) {
-            window.UI.updateLastPacketTime(1, this.state.meshtasticLastRxTime);
-        }
         
         // Track protocol switches
         if (this.state.lastProtocol !== null && this.state.lastProtocol !== this.state.currentProtocol) {
@@ -253,10 +274,12 @@ class App {
             } else if (timeSincePacket < 10000) {
                 activity = 'Listening';
             } else {
-                activity = this.state.currentProtocol === 0 ? 'Listening (MeshCore)' : 'Listening (Meshtastic)';
+                const rxProtocolName = window.ProtocolRegistry.getName(this.state.rx_protocol);
+                activity = `Listening (${rxProtocolName})`;
             }
         } else {
-            activity = this.state.currentProtocol === 0 ? 'Listening (MeshCore)' : 'Listening (Meshtastic)';
+            const rxProtocolName = window.ProtocolRegistry.getName(this.state.rx_protocol);
+            activity = `Listening (${rxProtocolName})`;
         }
         
         let uptime = '--';
@@ -293,36 +316,78 @@ class App {
     }
 
     async sendTestMessage(protocol) {
-        const protocolName = protocol === 0 ? 'MeshCore' : (protocol === 1 ? 'Meshtastic' : 'Both');
+        let protocolName;
+        if (protocol === 2) {
+            protocolName = 'All';
+        } else if (window.ProtocolRegistry.isValidProtocolId(protocol)) {
+            protocolName = window.ProtocolRegistry.getName(protocol);
+        } else {
+            protocolName = `Protocol ${protocol}`;
+        }
         window.UI.addLogEntry(`Sending ${protocolName} test message...`, 'info');
         await window.serialComm.sendTestMessage(protocol);
     }
 
-    updateIntervalInputState() {
+    updateControlVisibility() {
         const protocolSelect = document.getElementById('protocolSelect');
-        const intervalInput = document.getElementById('switchIntervalInput');
-        const isAutoSwitch = parseInt(protocolSelect.value) === 2;
+        const listenProtocolGroup = document.getElementById('listenProtocolGroup');
+        const transmitProtocolsGroup = document.getElementById('transmitProtocolsGroup');
+        const switchIntervalGroup = document.getElementById('switchIntervalGroup');
+        const isAutoSwitch = protocolSelect ? parseInt(protocolSelect.value) === 2 : false;
         
-        // Only enable interval input when Auto-Switch is selected
-        intervalInput.disabled = !this.state.connected || !isAutoSwitch;
+        // Show/hide groups based on mode
+        if (listenProtocolGroup) {
+            listenProtocolGroup.style.display = isAutoSwitch ? 'none' : 'block';
+        }
+        if (transmitProtocolsGroup) {
+            transmitProtocolsGroup.style.display = isAutoSwitch ? 'none' : 'block';
+        }
+        if (switchIntervalGroup) {
+            switchIntervalGroup.style.display = isAutoSwitch ? 'block' : 'none';
+        }
+        
+        // Enable/disable controls
+        const listenProtocolSelect = document.getElementById('listenProtocolSelect');
+        const intervalInput = document.getElementById('switchIntervalInput');
+        
+        if (listenProtocolSelect) {
+            listenProtocolSelect.disabled = !this.state.connected || isAutoSwitch;
+        }
+        // Enable/disable transmit protocol checkboxes dynamically
+        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox) {
+                checkbox.disabled = !this.state.connected || isAutoSwitch;
+            }
+        }
+        if (intervalInput) {
+            intervalInput.disabled = !this.state.connected || !isAutoSwitch;
+        }
+    }
+
+    updateTransmitProtocolsFromListen() {
+        const listenProtocolSelect = document.getElementById('listenProtocolSelect');
+        if (!listenProtocolSelect) return;
+        
+        const listenProtocol = parseInt(listenProtocolSelect.value);
+        
+        // Auto-set transmit protocols to all except listen protocol (dynamic)
+        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox) {
+                checkbox.checked = (listenProtocol !== i);
+            }
+        }
     }
 
     async saveSettings() {
         const protocolSelect = document.getElementById('protocolSelect');
+        const listenProtocolSelect = document.getElementById('listenProtocolSelect');
         const intervalInput = document.getElementById('switchIntervalInput');
         
-        const protocol = parseInt(protocolSelect.value);
+        const protocolMode = parseInt(protocolSelect.value);
         
-        // Set protocol first
-        if (protocol !== 2) {
-            // Manual mode - set protocol and disable auto-switch
-            const protocolName = protocol === 0 ? 'MeshCore' : 'Meshtastic';
-            window.UI.addLogEntry(`Setting protocol to ${protocolName}...`, 'info');
-            await window.serialComm.setProtocol(protocol);
-            // Set interval to 0 to disable auto-switch
-            await window.serialComm.setSwitchInterval(0);
-            this.state.switchInterval = 0;
-        } else {
+        if (protocolMode === 2) {
             // Auto-switch mode - use interval value
             const interval = parseInt(intervalInput.value);
             if (interval !== this.state.switchInterval) {
@@ -330,7 +395,31 @@ class App {
                 await window.serialComm.setSwitchInterval(interval);
                 this.state.switchInterval = interval;
             }
+            // Set protocol mode to auto-switch (value 2)
+            await window.serialComm.setProtocol(2);
             window.UI.addLogEntry('Auto-switching enabled', 'info');
+        } else {
+            // Manual mode - set listen protocol, transmit protocols, and disable auto-switch
+            const listenProtocol = parseInt(listenProtocolSelect.value);
+            const protocolName = window.ProtocolRegistry.getName(listenProtocol);
+            window.UI.addLogEntry(`Setting RX protocol to ${protocolName}...`, 'info');
+            await window.serialComm.setRxProtocol(listenProtocol);
+            
+            // Build transmit protocol bitmask dynamically
+            let txBitmask = 0;
+            for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+                const checkbox = document.getElementById(`transmitProtocol${i}`);
+                if (checkbox && checkbox.checked) {
+                    txBitmask |= (1 << i); // Set bit for protocol ID
+                }
+            }
+            
+            window.UI.addLogEntry(`Setting TX protocols (bitmask: 0x${txBitmask.toString(16).padStart(2, '0')})...`, 'info');
+            await window.serialComm.setTxProtocols(txBitmask);
+            
+            // Set interval to 0 to disable auto-switch
+            await window.serialComm.setSwitchInterval(0);
+            this.state.switchInterval = 0;
         }
         
         // Reset dirty flag after saving
@@ -348,32 +437,31 @@ class App {
         window.UI.addLogEntry('Settings cancelled - form reset to device state', 'info');
     }
 
-    async saveMeshCoreParams() {
-        const freqInput = document.getElementById('meshcoreFreqInput');
-        const bwSelect = document.getElementById('meshcoreBwSelect');
+    async saveProtocolParams(protocolId) {
+        const freqInput = document.getElementById(`protocol${protocolId}FreqInput`);
+        const bwSelect = document.getElementById(`protocol${protocolId}BwSelect`);
+        if (!freqInput || !bwSelect) return;
+        
         const frequencyHz = Math.round(parseFloat(freqInput.value) * 1000000);
         const bandwidth = parseInt(bwSelect.value);
+        const protocolName = window.ProtocolRegistry.getName(protocolId);
         
-        if (frequencyHz >= 902000000 && frequencyHz <= 928000000 && bandwidth >= 0 && bandwidth <= 9) {
-            window.UI.addLogEntry(`Setting MeshCore: ${(frequencyHz/1000000).toFixed(3)} MHz, BW=${bandwidth}`, 'info');
-            await window.serialComm.setMeshCoreParams(frequencyHz, bandwidth);
+        // Note: Frequency validation is now done by the device based on radio capabilities
+        if (bandwidth >= 0 && bandwidth <= 9) {
+            window.UI.addLogEntry(`Setting ${protocolName}: ${(frequencyHz/1000000).toFixed(3)} MHz, BW=${bandwidth}`, 'info');
+            await window.serialComm.setProtocolParams(protocolId, frequencyHz, bandwidth);
         } else {
-            window.UI.addLogEntry('Invalid MeshCore parameters', 'error');
+            window.UI.addLogEntry(`Invalid ${protocolName} parameters`, 'error');
         }
     }
 
+    // Legacy wrapper functions for backward compatibility with HTML
+    async saveMeshCoreParams() {
+        await this.saveProtocolParams(window.ProtocolRegistry.PROTOCOL_MESHCORE);
+    }
+
     async saveMeshtasticParams() {
-        const freqInput = document.getElementById('meshtasticFreqInput');
-        const bwSelect = document.getElementById('meshtasticBwSelect');
-        const frequencyHz = Math.round(parseFloat(freqInput.value) * 1000000);
-        const bandwidth = parseInt(bwSelect.value);
-        
-        if (frequencyHz >= 902000000 && frequencyHz <= 928000000 && bandwidth >= 0 && bandwidth <= 9) {
-            window.UI.addLogEntry(`Setting Meshtastic: ${(frequencyHz/1000000).toFixed(3)} MHz, BW=${bandwidth}`, 'info');
-            await window.serialComm.setMeshtasticParams(frequencyHz, bandwidth);
-        } else {
-            window.UI.addLogEntry('Invalid Meshtastic parameters', 'error');
-        }
+        await this.saveProtocolParams(window.ProtocolRegistry.PROTOCOL_MESHTASTIC);
     }
 
     handleMessage(respId, data) {
@@ -387,12 +475,15 @@ class App {
                     }
                     this.state.infoReceived = true;
                     
-                    this.state.meshcoreFreq = info.meshcoreFreq;
-                    this.state.meshtasticFreq = info.meshtasticFreq;
-                    this.state.currentProtocol = info.currentProtocol;
+                    // Update protocol state from device info
+                    // Note: protocol.js still uses meshcore/meshtastic names for backward compatibility with firmware protocol
+                    this.state.protocols[0].freq = info.meshcoreFreq;
+                    this.state.protocols[1].freq = info.meshtasticFreq;
+                    this.state.protocols[0].bandwidth = info.meshcoreBandwidth;
+                    this.state.protocols[1].bandwidth = info.meshtasticBandwidth;
+                    this.state.rx_protocol = info.currentProtocol;
+                    this.state.currentProtocol = info.currentProtocol; // Legacy compatibility
                     this.state.switchInterval = info.switchInterval;
-                    this.state.meshcoreBandwidth = info.meshcoreBandwidth;
-                    this.state.meshtasticBandwidth = info.meshtasticBandwidth;
                     
                     // Use desiredProtocolMode from device if available, otherwise infer from switchInterval
                     const protocolMode = info.desiredProtocolMode !== undefined 
@@ -400,21 +491,23 @@ class App {
                         : (info.switchInterval === 0 ? info.currentProtocol : 2);
                     
                     // Determine what protocol mode will be set in dropdown
+                    const rxProtocolName = window.ProtocolRegistry.getName(info.currentProtocol);
                     const protocolModeText = protocolMode === 2 
                         ? `Auto-Switch (${info.switchInterval}ms)` 
-                        : `Manual (${protocolMode === 0 ? 'MeshCore' : 'Meshtastic'})`;
+                        : `Manual (${rxProtocolName})`;
                     
                     // Single consolidated log message with all device status
-                    console.log('Device Status:', {
-                        protocol: info.currentProtocol === 0 ? 'MeshCore' : 'Meshtastic',
+                    const status = {
+                        rx_protocol: rxProtocolName,
                         switchInterval: info.switchInterval,
                         desiredProtocolMode: protocolMode,
-                        protocolMode: protocolModeText,
-                        meshcoreFreq: `${(info.meshcoreFreq / 1000000).toFixed(3)} MHz`,
-                        meshtasticFreq: `${(info.meshtasticFreq / 1000000).toFixed(3)} MHz`,
-                        meshcoreBW: info.meshcoreBandwidth,
-                        meshtasticBW: info.meshtasticBandwidth
-                    });
+                        protocolMode: protocolModeText
+                    };
+                    for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+                        status[`protocol${i}Freq`] = `${(this.state.protocols[i].freq / 1000000).toFixed(3)} MHz`;
+                        status[`protocol${i}BW`] = this.state.protocols[i].bandwidth;
+                    }
+                    console.log('Device Status:', status);
                     
                     window.UI.updateFrequencies(info.meshcoreFreq, info.meshtasticFreq);
                     window.UI.updateProtocolStatus(info.currentProtocol);
@@ -422,18 +515,21 @@ class App {
                     if (!this.state.controlsFormDirty) {
                         window.UI.updateSwitchInterval(info.switchInterval);
                         window.UI.updateProtocolSelect(protocolMode, info.switchInterval);
+                        window.UI.updateListenProtocol(info.currentProtocol);
+                        window.UI.updateTransmitProtocols(info.currentProtocol);
                         window.UI.updateProtocolParams(info.meshcoreFreq, info.meshcoreBandwidth, info.meshtasticFreq, info.meshtasticBandwidth);
                     }
                     
-                    // Update interval input enabled state based on protocol mode
-                    this.updateIntervalInputState();
+                    // Update control visibility and enabled state based on protocol mode
+                    this.updateControlVisibility();
                     
                     // Only log firmware info once on first connection
                     if (!this.state.firmwareInfoLogged) {
                         const intervalText = info.switchInterval === 0 ? 'Off (Manual)' : `${info.switchInterval}ms`;
+                        const rxProtocolName = window.ProtocolRegistry.getName(info.currentProtocol);
                         const protocolModeTextLog = protocolMode === 2 
                             ? `Auto-Switch (${info.switchInterval}ms)` 
-                            : `Manual (${protocolMode === 0 ? 'MeshCore' : 'Meshtastic'})`;
+                            : `Manual (${rxProtocolName})`;
                         window.UI.addLogEntry(`Device ready: Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Mode: ${protocolModeTextLog}`, 'success');
                         this.state.firmwareInfoLogged = true;
                     }
@@ -445,12 +541,14 @@ class App {
             case window.Protocol.RESP_STATS:
                 const stats = window.Protocol.decodeStats(data);
                 if (stats) {
-                    this.state.meshcoreRx = stats.meshcoreRx;
-                    this.state.meshtasticRx = stats.meshtasticRx;
-                    this.state.meshcoreTx = stats.meshcoreTx;
-                    this.state.meshtasticTx = stats.meshtasticTx;
+                    // Update protocol stats (protocol.js still uses meshcore/meshtastic names for backward compatibility)
+                    this.state.protocols[0].rx = stats.meshcoreRx;
+                    this.state.protocols[1].rx = stats.meshtasticRx;
+                    this.state.protocols[0].tx = stats.meshcoreTx;
+                    this.state.protocols[1].tx = stats.meshtasticTx;
                     this.state.conversionErrors = stats.conversionErrors;
                     
+                    // Update UI (UI functions still use protocol-specific names for backward compatibility)
                     window.UI.updateMeshCoreRx(stats.meshcoreRx);
                     window.UI.updateMeshtasticRx(stats.meshtasticRx);
                     window.UI.updateMeshCoreTx(stats.meshcoreTx);
@@ -470,14 +568,12 @@ class App {
                     this.state.lastActivityTime = now;
                     
                     // Update last RX time for the protocol
-                    if (packet.protocol === 0) {
-                        this.state.meshcoreLastRxTime = now;
-                    } else {
-                        this.state.meshtasticLastRxTime = now;
+                    if (window.ProtocolRegistry.isValidProtocolId(packet.protocol)) {
+                        this.state.protocols[packet.protocol].lastRxTime = now;
                     }
                     
                     window.UI.updateLastPacket(packet.protocol, packet.rssi, packet.snr, packet.data);
-                    const protocolName = packet.protocol === 0 ? 'MeshCore' : 'Meshtastic';
+                    const protocolName = window.ProtocolRegistry.getName(packet.protocol);
                     window.UI.addLogEntry(`${protocolName} packet: RSSI=${packet.rssi}dBm SNR=${packet.snr}dB Len=${packet.data.length}`, 'info');
                 }
                 break;

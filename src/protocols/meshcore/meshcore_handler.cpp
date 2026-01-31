@@ -1,5 +1,6 @@
 #include "meshcore_handler.h"
-#include "config.h"
+#include "config.h"  // MeshCore protocol-specific config
+#include "../meshtastic/config.h"  // Meshtastic config (for MESHTASTIC_HEADER_SIZE, MAX_MESHTASTIC_PAYLOAD_SIZE)
 #include <string.h>
 
 bool meshcore_hasTransportCodes(uint8_t header) {

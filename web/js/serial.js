@@ -116,33 +116,36 @@ class SerialComm {
     }
 
     async setProtocol(protocol) {
-        // protocol: 0 = MeshCore, 1 = Meshtastic
+        // protocol: 0 = MeshCore, 1 = Meshtastic, 2 = Auto-Switch
         const data = new Uint8Array([protocol]);
         await this.sendCommand(window.Protocol.CMD_SET_PROTOCOL, data);
     }
 
-    async setMeshCoreParams(frequencyHz, bandwidth) {
-        // 4 bytes frequency (little-endian) + 1 byte bandwidth
-        const data = new Uint8Array([
-            frequencyHz & 0xFF,
-            (frequencyHz >> 8) & 0xFF,
-            (frequencyHz >> 16) & 0xFF,
-            (frequencyHz >> 24) & 0xFF,
-            bandwidth & 0xFF
-        ]);
-        await this.sendCommand(window.Protocol.CMD_SET_MESHCORE_PARAMS, data);
+    async setRxProtocol(protocolId) {
+        // Set listen protocol: 0 = MeshCore, 1 = Meshtastic
+        const data = new Uint8Array([protocolId]);
+        await this.sendCommand(window.Protocol.CMD_SET_RX_PROTOCOL, data);
     }
 
-    async setMeshtasticParams(frequencyHz, bandwidth) {
-        // 4 bytes frequency (little-endian) + 1 byte bandwidth
+    async setTxProtocols(bitmask) {
+        // Set transmit protocols: bitmask (bit 0 = MeshCore, bit 1 = Meshtastic)
+        // Example: 0x01 = MeshCore only, 0x02 = Meshtastic only, 0x03 = Both
+        const data = new Uint8Array([bitmask]);
+        await this.sendCommand(window.Protocol.CMD_SET_TX_PROTOCOLS, data);
+    }
+
+    async setProtocolParams(protocolId, frequencyHz, bandwidth) {
+        // Generic command: 1 byte protocol ID + 4 bytes frequency (little-endian) + 1 byte bandwidth
+        // protocolId: 0 = MeshCore, 1 = Meshtastic
         const data = new Uint8Array([
-            frequencyHz & 0xFF,
-            (frequencyHz >> 8) & 0xFF,
-            (frequencyHz >> 16) & 0xFF,
-            (frequencyHz >> 24) & 0xFF,
-            bandwidth & 0xFF
+            protocolId & 0xFF,        // Protocol ID
+            frequencyHz & 0xFF,        // Frequency low byte
+            (frequencyHz >> 8) & 0xFF, // Frequency byte 1
+            (frequencyHz >> 16) & 0xFF, // Frequency byte 2
+            (frequencyHz >> 24) & 0xFF, // Frequency high byte
+            bandwidth & 0xFF           // Bandwidth
         ]);
-        await this.sendCommand(window.Protocol.CMD_SET_MESHTASTIC_PARAMS, data);
+        await this.sendCommand(window.Protocol.CMD_SET_PROTOCOL_PARAMS, data);
     }
 
     async readLoop() {

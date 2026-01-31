@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "config.h"
-#include "meshcore_handler.h"  // Includes MeshtasticHeader and MeshCorePacket definitions
+#include "config.h"  // Protocol-specific config
+#include "../meshcore/meshcore_handler.h"  // Includes MeshtasticHeader and MeshCorePacket definitions
 
 // Meshtastic packet flags masks
 #define PACKET_FLAGS_HOP_LIMIT_MASK 0x07

@@ -145,18 +145,50 @@ const UI = {
         const protocolDisplay = document.getElementById('protocolDisplay');
         
         if (protocolSelect && protocolDisplay) {
-            // Only update if form is not dirty (checked by caller)
-            // Directly set from polled status - use desiredProtocolMode from device
-            protocolSelect.value = desiredProtocolMode.toString();
+            // Map: 0=MeshCore, 1=Meshtastic, 2=Auto-Switch -> 0=Manual, 2=Auto-Switch
+            const modeValue = desiredProtocolMode === 2 ? 2 : 0;
+            protocolSelect.value = modeValue.toString();
             
             if (desiredProtocolMode === 2) {
-                // Auto-switch mode
+                // Auto-switch mode - show interval
                 protocolDisplay.textContent = `Current: Auto-Switch (${switchInterval}ms)`;
             } else {
                 // Manual mode
-                const protocolName = desiredProtocolMode === 0 ? 'MeshCore' : 'Meshtastic';
-                protocolDisplay.textContent = `Current: ${protocolName} (Manual)`;
+                protocolDisplay.textContent = `Current: Manual`;
             }
+        }
+    },
+
+    updateListenProtocol(currentProtocol) {
+        const listenProtocolSelect = document.getElementById('listenProtocolSelect');
+        const listenProtocolDisplay = document.getElementById('listenProtocolDisplay');
+        
+        if (listenProtocolSelect) {
+            listenProtocolSelect.value = currentProtocol.toString();
+        }
+        if (listenProtocolDisplay) {
+            const protocolName = currentProtocol === 0 ? 'MeshCore' : 'Meshtastic';
+            listenProtocolDisplay.textContent = `Current: ${protocolName}`;
+        }
+    },
+
+    updateTransmitProtocols(listenProtocol) {
+        const transmitProtocolsDisplay = document.getElementById('transmitProtocolsDisplay');
+        
+        // Transmit protocols are all except the listen protocol
+        const protocols = [];
+        for (let i = 0; i < ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox) {
+                checkbox.checked = (listenProtocol !== i);
+                if (listenProtocol !== i) {
+                    protocols.push(ProtocolRegistry.getName(i));
+                }
+            }
+        }
+        
+        if (transmitProtocolsDisplay) {
+            transmitProtocolsDisplay.textContent = `Current: ${protocols.join(', ') || 'None'}`;
         }
     },
 
@@ -230,7 +262,15 @@ const UI = {
         document.getElementById('saveSettingsBtn').disabled = !connected;
         document.getElementById('cancelSettingsBtn').disabled = !connected;
         document.getElementById('protocolSelect').disabled = !connected;
-        // Interval input enabled state is controlled by protocol mode, not just connection
+        document.getElementById('listenProtocolSelect').disabled = !connected;
+        // Update transmit protocol checkboxes dynamically
+        for (let i = 0; i < ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox) {
+                checkbox.disabled = !connected;
+            }
+        }
+        // Interval input and other controls enabled state is controlled by protocol mode
         const protocolSelect = document.getElementById('protocolSelect');
         const intervalInput = document.getElementById('switchIntervalInput');
         if (intervalInput && protocolSelect) {
