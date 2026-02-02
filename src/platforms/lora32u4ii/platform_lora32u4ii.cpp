@@ -1,6 +1,7 @@
 /**
- * Platform Interface Implementation for LoRa32u4II
+ * Platform Implementation for LoRa32u4II
  * 
+ * This file implements platform-specific functionality for LoRa32u4II.
  * This file is only compiled for LoRa32u4II builds (excluded for other platforms
  * via platformio.ini src_filter).
  */
@@ -67,4 +68,17 @@ int8_t platform_getRadioPowerEnablePin() {
 
 uint32_t platform_getSpiFrequency() {
     return SPI_FREQ;  // 1 MHz for LoRa32u4II
+}
+
+// SX126x-specific configuration - not used by SX1276
+float platform_getTcxoVoltage() {
+    return 0.0f;  // SX1276 doesn't use TCXO voltage setting
+}
+
+bool platform_useDio2AsRfSwitch() {
+    return false;  // SX1276 doesn't use DIO2 as RF switch
+}
+
+bool platform_useRegulatorLDO() {
+    return false;  // Not applicable for SX1276
 }

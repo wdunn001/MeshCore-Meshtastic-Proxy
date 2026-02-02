@@ -1,8 +1,8 @@
 /**
- * Radio Interface Implementation for LoRa32u4II Platform
+ * Radio Implementation for LoRa32u4II Platform
  * 
  * This file implements the radio interface for LoRa32u4II by delegating to
- * the SX1276 direct SPI implementation.
+ * the SX1276 direct SPI implementation (not RadioLib).
  * 
  * This file is only compiled for LoRa32u4II builds (excluded for other platforms
  * via platformio.ini src_filter).
@@ -11,7 +11,7 @@
 #include "../../radio/radio_interface.h"
 #include "../../radio/sx1276_direct/sx1276_direct.h"
 
-// Implement radio interface by delegating to SX1276 direct implementation
+// Implement radio interface by delegating to SX1276 direct SPI implementation
 bool radio_init() { 
     return sx1276_direct_init(); 
 }

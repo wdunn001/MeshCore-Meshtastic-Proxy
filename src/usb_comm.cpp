@@ -11,11 +11,13 @@
 extern ProtocolId rx_protocol;      // Currently listening protocol
 extern ProtocolId tx_protocols[];  // Protocols to transmit to
 extern uint8_t tx_protocol_count;   // Number of transmit protocols
-extern ProtocolState currentProtocol;  // Legacy protocol state
 extern uint16_t protocolSwitchIntervalMs; // Configurable switch interval
 extern bool autoSwitchEnabled; // Auto-switching enabled flag
-extern uint8_t desiredProtocolMode; // 0=First protocol, 1=Second protocol, 2=Auto-Switch
+// desiredProtocolMode always equals rx_protocol since auto-switch is disabled
+// Kept for web interface compatibility (0=MeshCore, 1=Meshtastic)
+extern uint8_t desiredProtocolMode;
 extern ProtocolRuntimeState protocolStates[];  // Protocol runtime state objects
+extern bool radioInitialized; // Track if radio initialized successfully
 
 // Forward declarations
 void sendTestMessage(ProtocolId protocol);
@@ -50,30 +52,44 @@ bool USBComm::readCommand(uint8_t* cmd, uint8_t* data, uint8_t* len) {
         return false; // Not enough data for header
     }
     
+    // Peek at the first byte to check if it's a valid command
+    uint8_t peekCmd = Serial.peek();
+    if (peekCmd < 0x01 || peekCmd > 0x0A) {
+        // Invalid command ID - discard this byte and try to resync
+        Serial.read(); // Discard invalid byte
+        return false; // Return false to try again on next call
+    }
+    
     *cmd = Serial.read();
     *len = Serial.read();
     
+    // Validate command ID (should be 0x01-0x0A) - double check after reading
+    if (*cmd < 0x01 || *cmd > 0x0A) {
+        // Invalid command ID - we've already consumed both bytes, return false to resync
+        return false;
+    }
+    
     // Validate length
     if (*len > 64) {
-        // Invalid length - consume remaining bytes to resync
-        while (Serial.available() > 0 && Serial.peek() != *cmd) {
-            Serial.read();
-        }
+        // Invalid length - discard both bytes and return false
         return false;
     }
     
     // Read payload if present
     if (*len > 0) {
+        // Wait for payload data with timeout
         uint8_t bytesRead = 0;
         uint32_t startTime = millis();
         while (bytesRead < *len && (millis() - startTime) < 100) {
             if (Serial.available() > 0) {
                 data[bytesRead++] = Serial.read();
+            } else {
+                delay(1); // Small delay to allow more data to arrive
             }
         }
         
         if (bytesRead < *len) {
-            // Timeout - incomplete command
+            // Timeout - incomplete command, discard what we read
             return false;
         }
     }
@@ -84,6 +100,7 @@ bool USBComm::readCommand(uint8_t* cmd, uint8_t* data, uint8_t* len) {
 void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
     switch (cmd) {
         case CMD_GET_INFO:
+            // Immediately send info response
             sendInfo();
             break;
             
@@ -247,8 +264,7 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
                 ProtocolId rxProtocol = (ProtocolId)data[0];
                 if (rxProtocol < PROTOCOL_COUNT) {
                     set_rx_protocol(rxProtocol);
-                    // Update desiredProtocolMode to match RX protocol (for manual mode)
-                    desiredProtocolMode = rxProtocol;
+                    // desiredProtocolMode is automatically updated in set_rx_protocol()
                     ProtocolInterfaceImpl* iface = protocol_interface_get(rxProtocol);
                     if (iface != nullptr) {
                         char msg[40];
@@ -295,9 +311,27 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
 }
 
 void USBComm::sendResponse(uint8_t respId, uint8_t* data, uint8_t len) {
-    // Check available space in serial buffer
-    if (Serial.availableForWrite() < (2 + len)) {
-        return; // Not enough space - skip this response to prevent blocking
+    // Always send critical responses (INFO, STATS, ERROR) - don't check buffer
+    // For other responses, check buffer space to avoid blocking
+    bool isCritical = (respId == RESP_INFO_REPLY || respId == RESP_STATS || respId == RESP_ERROR);
+    
+    if (!isCritical) {
+        // Check available space for non-critical responses
+        if (Serial.availableForWrite() < (2 + len)) {
+            return; // Not enough space - skip this response
+        }
+    }
+    
+    // For critical responses, ensure we have space (wait if necessary)
+    if (isCritical) {
+        // Wait up to 50ms for buffer space to become available
+        // Don't wait too long - we need to process USB commands
+        uint32_t startTime = millis();
+        while (Serial.availableForWrite() < (2 + len) && (millis() - startTime) < 50) {
+            delay(1);
+        }
+        // If still no space after waiting, try to send anyway (might block briefly)
+        // But don't wait forever - send what we can
     }
     
     // Write header
@@ -307,6 +341,15 @@ void USBComm::sendResponse(uint8_t respId, uint8_t* data, uint8_t len) {
     // Write payload if present
     if (len > 0 && data != nullptr) {
         Serial.write(data, len);
+    }
+    
+    // For critical responses, ensure data is sent immediately
+    // On nRF52 and other platforms, Serial.write() buffers data - flush() is needed to send it
+    if (isCritical) {
+        // Flush critical responses - but don't block forever
+        // Some platforms might hang on flush() if USB is disconnected
+        Serial.flush(); // Flush critical responses - brief blocking is acceptable
+        // Note: If flush() blocks, at least the data is written and will be sent when USB is ready
     }
 }
 
@@ -320,17 +363,19 @@ void USBComm::sendInfo() {
     *p++ = 0x00; // Minor
     
     // Get frequencies from protocol states dynamically
+    // Use safe access with null checks and bounds checking
     uint32_t firstFreq = 0;
     uint32_t secondFreq = 0;
     uint8_t firstBw = 0;
     uint8_t secondBw = 0;
     
+    // Safely access protocol states (they might not be initialized yet during early setup)
     if (protocolStates != nullptr) {
-        if (PROTOCOL_COUNT > PROTOCOL_MESHCORE) {
+        if (PROTOCOL_COUNT > PROTOCOL_MESHCORE && PROTOCOL_MESHCORE < PROTOCOL_COUNT) {
             firstFreq = protocolStates[PROTOCOL_MESHCORE].config.frequencyHz;
             firstBw = protocolStates[PROTOCOL_MESHCORE].config.bandwidth;
         }
-        if (PROTOCOL_COUNT > PROTOCOL_MESHTASTIC) {
+        if (PROTOCOL_COUNT > PROTOCOL_MESHTASTIC && PROTOCOL_MESHTASTIC < PROTOCOL_COUNT) {
             secondFreq = protocolStates[PROTOCOL_MESHTASTIC].config.frequencyHz;
             secondBw = protocolStates[PROTOCOL_MESHTASTIC].config.bandwidth;
         }
@@ -353,10 +398,12 @@ void USBComm::sendInfo() {
     *p++ = (uint8_t)((protocolSwitchIntervalMs >> 8) & 0xFF);
     
     // Current protocol and bandwidths
-    *p++ = currentProtocol;
+    *p++ = (uint8_t)rx_protocol;
     *p++ = firstBw;
     *p++ = secondBw;
-    *p++ = desiredProtocolMode; // 0=First protocol, 1=Second protocol, 2=Auto-Switch
+    // desiredProtocolMode always equals rx_protocol since auto-switch is disabled
+    // (kept for web interface compatibility)
+    *p++ = desiredProtocolMode; // 0=MeshCore, 1=Meshtastic (matches rx_protocol)
     
     // Platform ID: 0 = LoRa32u4II, 1 = RAK4631
     #ifdef RAK4631_BOARD
@@ -365,6 +412,7 @@ void USBComm::sendInfo() {
         *p++ = 0; // LoRa32u4II (default)
     #endif
     
+    // Always send the response - this is a critical response
     sendResponse(RESP_INFO_REPLY, info, 18);
 }
 

@@ -21,10 +21,11 @@
   #if __has_include(<SPI.h>)
     #include <SPI.h>
     
-    // On nRF52 Adafruit core, SPI.h defines SPIClass but may not declare the SPI object
-    // Declare SPI as extern - the actual definition is in SPI.cpp from the SPI library
-    // This ensures SPI is available when RADIOLIB_DEFAULT_SPI macro expands
-    extern SPIClass SPI;
+    // For nRF52 (RAK4631), SPI is defined in platform.cpp, so declare it extern
+    // For other platforms (AVR), SPI is defined globally by Arduino core
+    #ifdef RAK4631_BOARD
+      extern SPIClass SPI;
+    #endif
 
     // Define RADIOLIB_DEFAULT_SPI BEFORE RadioLib's BuildOpt.h checks for it
     // This prevents RadioLib from trying to define it as SPI when SPI might not be in scope

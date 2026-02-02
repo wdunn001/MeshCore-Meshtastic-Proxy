@@ -233,12 +233,17 @@ The **Platform Layer** provides platform-specific hardware abstraction. Each sup
 - `platform_init()` - Initialize platform hardware
 - `platform_setLed()`, `platform_blinkLed()` - LED control
 - `platform_getMaxTxPower()` - Get platform-specific TX power limit
-- `platform_getRadioNssPin()`, `platform_getRadioResetPin()`, etc. - Radio pin configuration
+- `platform_getRadioNssPin()`, `platform_getRadioResetPin()`, `platform_getRadioDio0Pin()`, `platform_getRadioDio1Pin()`, `platform_getRadioBusyPin()`, `platform_getRadioPowerEnablePin()` - Radio pin configuration
 - `platform_getSerialBaud()`, `platform_getSpiFrequency()` - Communication settings
+- `platform_getTcxoVoltage()` - TCXO voltage for SX126x radios (0.0 if no TCXO)
+- `platform_useDio2AsRfSwitch()` - Whether DIO2 controls RF switch (SX126x only)
+- `platform_useRegulatorLDO()` - Whether to use LDO regulator (false = DC-DC)
+
+**IMPORTANT - No Separate Variant Files:** This project does **not** use standalone `variant.h` files like some Arduino cores do. All hardware configuration is provided through the **platform interface functions**. Pin definitions and hardware-specific constants are defined in each platform's `config.h` (or `variant.h` if it exists), but they are **only accessed via the platform interface functions**, never directly by the radio or application layers. This ensures clean separation between layers.
 
 **Implementation:** Each platform directory (e.g., `platforms/lora32u4ii/`) contains:
-- `platform_interface.cpp` - Implements platform-specific functionality
-- `radio_interface.cpp` - Delegates radio calls to the appropriate radio chip implementation
+- `platform_lora32u4ii.cpp` / `platform_rak4631.cpp` - Platform-specific implementations
+- `radio_lora32u4ii.cpp` / `radio_rak4631.cpp` - Platform-specific radio implementations that delegate to the appropriate radio chip implementation
 - `config.h` - Platform-specific pin definitions and constants
 
 **Example:** The LoRa32u4II platform implementation provides:
@@ -266,11 +271,42 @@ The **Radio Layer** provides hardware abstraction for different LoRa radio chips
 - `radio_getRssi()`, `radio_getSnr()` - Signal quality metrics
 - `radio_isPacketReceived()`, `radio_getPacketLength()` - Packet reception status
 
-**Implementation:** Each radio chip has its own direct SPI implementation:
+**Implementation:** Each radio chip has its own implementation:
 - `sx1276_direct/` - Direct register-level SX1276 implementation
 - `sx1262_direct/` - Direct register-level SX1262 implementation
+- `sx1276_radiolib/` - RadioLib-based SX1276 implementation
+- `sx1262_radiolib/` - RadioLib-based SX1262 implementation
 
-**Delegation:** Platform-specific `radio_interface.cpp` files delegate to the appropriate radio chip implementation. For example, LoRa32u4II's `radio_interface.cpp` delegates all `radio_*()` calls to `sx1276_direct_*()` functions.
+**SX126x-Specific Configuration (Critical for RAK4631):**
+
+The SX1262 radio chip requires additional configuration that the platform layer provides:
+
+1. **TCXO Voltage** (`platform_getTcxoVoltage()`): 
+   - RAK4631 uses a TCXO (Temperature Compensated Crystal Oscillator) powered via DIO3
+   - Must be set to **1.8V** for RAK4631 - without this, the radio has no clock source and will fail to initialize
+   - SX1276-based platforms return 0.0 (no TCXO)
+
+2. **DIO2 as RF Switch** (`platform_useDio2AsRfSwitch()`):
+   - RAK4631's antenna switch is controlled by DIO2
+   - Must call `radio->setDio2AsRfSwitch(true)` after initialization
+   - Without this, the antenna is not connected and TX/RX will fail
+
+3. **Regulator Type** (`platform_useRegulatorLDO()`):
+   - RAK4631 uses DC-DC regulator (more efficient) - return `false`
+   - Some boards may require LDO - return `true`
+
+These values are passed to `radio->begin()` during initialization:
+```cpp
+int state = radio->begin(freq, bw, sf, cr, syncWord, power, preamble,
+    platform_getTcxoVoltage(),    // CRITICAL for RAK4631!
+    platform_useRegulatorLDO()
+);
+if (platform_useDio2AsRfSwitch()) {
+    radio->setDio2AsRfSwitch(true);  // CRITICAL for RAK4631!
+}
+```
+
+**Delegation:** Platform-specific radio implementation files (e.g., `radio_lora32u4ii.cpp`, `radio_rak4631.cpp`) delegate to the appropriate radio chip implementation. For example, LoRa32u4II's `radio_lora32u4ii.cpp` delegates all `radio_*()` calls to `sx1276_direct_*()` functions.
 
 **Benefits:**
 - Radio chip implementations are reusable across platforms
@@ -344,15 +380,15 @@ The **Protocol Layer** handles protocol-specific packet formats and conversion l
 
 **To add a new platform:**
 1. Create `src/platforms/newplatform/` directory
-2. Implement `platform_interface.cpp` with platform-specific code
-3. Implement `radio_interface.cpp` that delegates to appropriate radio chip
+2. Implement platform-specific file (e.g., `platform_<platform>.cpp`) with platform-specific code
+3. Implement platform-specific radio file (e.g., `radio_<platform>.cpp`) that delegates to appropriate radio chip
 4. Create `config.h` with platform pin definitions
 5. Add platform build configuration to `platformio.ini`
 
 **To add a new radio chip:**
 1. Create `src/radio/newchip_direct/` directory
 2. Implement all functions from `radio_interface.h`
-3. Update platform's `radio_interface.cpp` to use new chip implementation
+3. Update platform's radio implementation file to use new chip implementation
 
 **To add a new protocol:**
 1. Create `src/protocols/newprotocol/` directory
@@ -408,7 +444,23 @@ The LoRa32u4II uses the ATMega32u4's built-in bootloader (avr109 protocol) which
 **Alternative**: Use the `upload.bat` script which guides you through this process.
 
 **RAK4631 (nRF52840):**
-The RAK4631 uses nRFUtil for uploading. Standard PlatformIO upload should work without special procedures.
+The RAK4631 uses nRFUtil (DFU) for uploading. The device must be put into bootloader mode before uploading:
+
+1. **Put device into bootloader mode:**
+   - **Method 1**: Double-press the RESET button quickly (within 1 second)
+   - **Method 2**: Hold BOOT button and press RESET, then release BOOT
+   - The device should appear as a USB drive or serial port
+   
+2. **Upload immediately** (bootloader mode times out after ~10 seconds):
+   ```bash
+   pio run -e rak4631 --target upload
+   ```
+
+3. **If upload fails:**
+   - Ensure no serial monitor is connected to the device
+   - Try putting device back into bootloader mode and retry
+   - Check that the correct COM port is selected
+   - Verify device is powered and USB cable is connected properly
 
 See `UPLOAD_TROUBLESHOOTING.md` for detailed troubleshooting (primarily for LoRa32u4II).
 
@@ -616,13 +668,13 @@ MeshcoreMeshstaticProxy/
 │   │   ├── platform_interface.h      # Platform abstraction interface
 │   │   ├── lora32u4ii/               # LoRa32u4II platform implementation
 │   │   │   ├── config.h              # Platform pin definitions
-│   │   │   ├── platform_interface.cpp # Platform-specific functions
-│   │   │   └── radio_interface.cpp   # Radio delegation (SX1276)
+│   │   │   ├── platform_lora32u4ii.cpp # Platform-specific functions
+│   │   │   └── radio_lora32u4ii.cpp   # Radio delegation (SX1276)
 │   │   └── rak4631/                  # RAK4631 platform implementation
 │   │       ├── config.h
-│   │       ├── platform_interface.cpp
+│   │       ├── platform_rak4631.cpp
 │   │       ├── platform.cpp          # Additional platform code
-│   │       ├── radio_interface.cpp   # Radio delegation (SX1262)
+│   │       ├── radio_rak4631.cpp   # Radio delegation (SX1262)
 │   │       └── variant.h
 │   │
 │   ├── radio/                         # Radio Layer
@@ -630,9 +682,15 @@ MeshcoreMeshstaticProxy/
 │   │   ├── sx1276_direct/            # SX1276 direct SPI implementation
 │   │   │   ├── sx1276_direct.h       # SX1276 register definitions
 │   │   │   └── sx1276_direct.cpp     # SX1276 register-level code
-│   │   └── sx1262_direct/            # SX1262 direct SPI implementation
-│   │       ├── sx1262_direct.h
-│   │       └── sx1262_direct.cpp
+│   │   ├── sx1262_direct/            # SX1262 direct SPI implementation
+│   │   │   ├── sx1262_direct.h
+│   │   │   └── sx1262_direct.cpp
+│   │   ├── sx1276_radiolib/          # SX1276 RadioLib implementation
+│   │   │   ├── sx1276_radiolib.h
+│   │   │   └── sx1276_radiolib.cpp
+│   │   └── sx1262_radiolib/          # SX1262 RadioLib implementation (used by RAK4631)
+│   │       ├── sx1262_radiolib.h
+│   │       └── sx1262_radiolib.cpp   # Uses platform_getTcxoVoltage(), etc.
 │   │
 │   ├── protocols/                     # Protocol Layer
 │   │   ├── protocol_interface.h      # Protocol abstraction interface
@@ -681,13 +739,15 @@ MeshcoreMeshstaticProxy/
 
 **Platform Layer:**
 - `src/platforms/platform_interface.h` - Platform API definition
-- `src/platforms/*/platform_interface.cpp` - Platform-specific implementations
-- `src/platforms/*/radio_interface.cpp` - Radio delegation to radio layer
+- `src/platforms/*/platform_*.cpp` - Platform-specific implementations
+- `src/platforms/*/radio_*.cpp` - Platform-specific radio implementations that delegate to radio layer
 
 **Radio Layer:**
 - `src/radio/radio_interface.h` - Radio API definition
-- `src/radio/sx1276_direct/*` - SX1276 chip implementation
-- `src/radio/sx1262_direct/*` - SX1262 chip implementation
+- `src/radio/sx1276_direct/*` - SX1276 direct register implementation
+- `src/radio/sx1262_direct/*` - SX1262 direct register implementation
+- `src/radio/sx1276_radiolib/*` - SX1276 RadioLib-based implementation
+- `src/radio/sx1262_radiolib/*` - SX1262 RadioLib-based implementation (gets TCXO/DIO2 config from platform)
 
 **Protocol Layer:**
 - `src/protocols/protocol_interface.h` - Protocol API definition
@@ -696,12 +756,71 @@ MeshcoreMeshstaticProxy/
 - `src/protocols/meshcore/*` - MeshCore protocol implementation
 - `src/protocols/meshtastic/*` - Meshtastic protocol implementation
 
+## Developer Notes (for AI Assistants)
+
+This section documents important architectural decisions to help AI coding assistants understand the project structure.
+
+### Platform Interface Pattern
+
+**All hardware configuration flows through `platform_interface.h`**. This is the single source of truth for hardware-specific values:
+
+```cpp
+// CORRECT: Get pin from platform interface
+int8_t nss = platform_getRadioNssPin();
+
+// WRONG: Don't access variant.h or config.h directly from radio/protocol code
+int8_t nss = P_LORA_NSS;  // Don't do this!
+```
+
+**Why**: This allows radio implementations to be hardware-agnostic. The same `sx1262_radiolib.cpp` works on any platform that implements the platform interface.
+
+### Adding Hardware-Specific Radio Configuration
+
+When a radio chip needs platform-specific configuration (like SX1262's TCXO voltage):
+
+1. **Add function to `platform_interface.h`**:
+   ```cpp
+   float platform_getTcxoVoltage();  // TCXO voltage (0.0 if no TCXO)
+   ```
+
+2. **Implement in each platform** (`platform_rak4631.cpp`, `platform_lora32u4ii.cpp`):
+   ```cpp
+   float platform_getTcxoVoltage() {
+       return 1.8f;  // RAK4631 needs 1.8V TCXO
+   }
+   ```
+
+3. **Use in radio implementation** (`sx1262_radiolib.cpp`):
+   ```cpp
+   float tcxo = platform_getTcxoVoltage();
+   radio->begin(..., tcxo, ...);
+   ```
+
+### Common Mistakes to Avoid
+
+1. **Don't create/edit variant.h files directly** - Add platform interface functions instead
+2. **Don't hardcode pin numbers in radio code** - Use `platform_getRadio*Pin()` functions
+3. **Don't assume all platforms have the same radio chip** - Platform's `radio_*.cpp` delegates to the correct implementation
+4. **Don't forget SX126x TCXO voltage** - Without it, the radio won't initialize (no clock source)
+5. **Don't forget SX126x DIO2 RF switch** - Without it, the antenna isn't connected
+
+### Layer Responsibilities Summary
+
+| Layer | Knows About | Does NOT Know About |
+|-------|-------------|---------------------|
+| **Platform** | Pin numbers, TCXO voltage, hardware limits | Protocols, packet formats |
+| **Radio** | How to talk to radio chips, RadioLib API | Which pins to use (gets from platform) |
+| **Protocol** | Packet formats, frequencies, LoRa params | Hardware details |
+| **Application** | Business logic, USB comm | Hardware or protocol internals |
+
 ## References
 
 - [MeshCore Source Code](https://github.com/meshtastic/MeshCore)
 - [Meshtastic Firmware](https://github.com/meshtastic/firmware)
 - [LoRa32u4-II Board Documentation](https://docs.platformio.org/en/latest/boards/atmelavr/lora32u4II.html)
 - [SX1276 Datasheet](https://www.semtech.com/products/wireless-rf/lora-transceivers/sx1276)
+- [SX1262 Datasheet](https://www.semtech.com/products/wireless-rf/lora-transceivers/sx1262)
+- [RadioLib Documentation](https://jgromes.github.io/RadioLib/)
 
 ## License
 

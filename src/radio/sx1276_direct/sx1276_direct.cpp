@@ -87,9 +87,20 @@ bool sx1276_direct_init() {
     sx1276_writeReg(REG_FIFO_TX_BASE_ADDR, 0x00);
     sx1276_writeReg(REG_FIFO_RX_BASE_ADDR, 0x00);
     
-    // Configure DIO0 for TX_DONE and RX_DONE
-    // DIO0: 00 = TxDone, 01 = RxDone (default mapping)
+    // CRITICAL: Configure LNA for maximum sensitivity
+    // LNA_GAIN_1 (max gain) + LNA_BOOST_ON (150% current)
+    sx1276_writeReg(REG_LNA, LNA_GAIN_1 | LNA_BOOST_ON);
+    
+    // CRITICAL: Enable AGC Auto in MODEM_CONFIG_3
+    // This allows the radio to automatically adjust gain for optimal reception
+    sx1276_writeReg(REG_MODEM_CONFIG_3, AGC_AUTO_ON);
+    
+    // Configure DIO0 mapping for RX_DONE (will be remapped for TX)
+    // DIO0: 00 = RxDone (in RX mode), TxDone (in TX mode)
     sx1276_writeReg(REG_DIO_MAPPING_1, 0x00);
+    
+    // Clear all IRQ flags
+    sx1276_writeReg(REG_IRQ_FLAGS, 0xFF);
     
     return true;
 }
@@ -126,16 +137,22 @@ void sx1276_direct_setFrequency(uint32_t freq_hz) {
 }
 
 void sx1276_direct_setPower(uint8_t power) {
-    if (power > 20) power = 20;
+    // SX1276 PA_CONFIG register (0x09):
+    // Bit 7: PaSelect - 0=RFO, 1=PA_BOOST (use PA_BOOST for higher power)
+    // Bits 6-4: MaxPower - not used when PA_BOOST selected
+    // Bits 3-0: OutputPower - Pout = 17 - (15 - OutputPower) = 2 + OutputPower dBm (PA_BOOST)
+    //                         Range: 2 to 17 dBm (OutputPower 0-15)
+    //                         For >17 dBm, need PA_DAC register (0x4D)
     
-    uint8_t paConfig = 0x80; // PA_BOOST
-    if (power > 17) {
-        paConfig |= 0x80 | (power - 5);
-    } else if (power > 14) {
-        paConfig |= 0x40 | (power - 2);
-    } else {
-        paConfig |= power;
-    }
+    if (power > 17) power = 17;  // Max without PA_DAC
+    if (power < 2) power = 2;    // Min with PA_BOOST
+    
+    // PA_BOOST mode: Pout = 2 + OutputPower, so OutputPower = power - 2
+    uint8_t outputPower = power - 2;
+    if (outputPower > 15) outputPower = 15;
+    
+    // PA_BOOST (bit 7) + OutputPower (bits 3-0)
+    uint8_t paConfig = 0x80 | outputPower;
     sx1276_writeReg(REG_PA_CONFIG, paConfig);
 }
 
@@ -155,11 +172,25 @@ void sx1276_direct_setSpreadingFactor(uint8_t sf) {
     config2 = (config2 & 0x0F) | (sf << 4);
     sx1276_writeReg(REG_MODEM_CONFIG_2, config2);
     
-    // Enable LNA boost for SF6
+    // Configure MODEM_CONFIG_3 based on spreading factor
+    // Always keep AGC_AUTO_ON, add LOW_DATA_RATE_OPTIMIZE for SF11/SF12
+    uint8_t config3 = AGC_AUTO_ON;  // Always enable AGC
+    if (sf >= 11) {
+        // Enable Low Data Rate Optimize for SF11/SF12 with low bandwidths
+        // This is required for symbol times > 16ms
+        config3 |= LOW_DATA_RATE_OPTIMIZE;
+    }
+    sx1276_writeReg(REG_MODEM_CONFIG_3, config3);
+    
+    // SF6 requires special detection optimize settings
     if (sf == 6) {
-        uint8_t config1 = sx1276_readReg(REG_MODEM_CONFIG_1);
-        config1 |= 0x08;
-        sx1276_writeReg(REG_MODEM_CONFIG_1, config1);
+        // For SF6, set detection optimize to 0x05 and threshold to 0x0C
+        sx1276_writeReg(REG_DETECTION_OPTIMIZE, 0x05);
+        sx1276_writeReg(REG_DETECTION_THRESHOLD, 0x0C);
+    } else {
+        // For SF7-12, use standard settings
+        sx1276_writeReg(REG_DETECTION_OPTIMIZE, 0x03);
+        sx1276_writeReg(REG_DETECTION_THRESHOLD, 0x0A);
     }
 }
 
@@ -185,6 +216,19 @@ void sx1276_direct_setInvertIQ(bool invert) {
 }
 
 void sx1276_direct_setMode(uint8_t mode) {
+    // Clear IRQ flags before mode change
+    sx1276_writeReg(REG_IRQ_FLAGS, 0xFF);
+    
+    // Configure DIO0 mapping based on mode
+    // DIO0 bits 7-6: 00=RxDone, 01=TxDone, 10=CadDone
+    if (mode == MODE_TX) {
+        // For TX mode, map DIO0 to TxDone (01 in bits 7-6)
+        sx1276_writeReg(REG_DIO_MAPPING_1, 0x40);
+    } else if (mode == MODE_RX_CONTINUOUS) {
+        // For RX mode, map DIO0 to RxDone (00 in bits 7-6)
+        sx1276_writeReg(REG_DIO_MAPPING_1, 0x00);
+    }
+    
     uint8_t targetMode = MODE_LONG_RANGE_MODE | mode;
     sx1276_writeReg(REG_OP_MODE, targetMode);
 }

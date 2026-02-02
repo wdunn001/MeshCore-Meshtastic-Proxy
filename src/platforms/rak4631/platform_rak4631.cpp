@@ -1,6 +1,7 @@
 /**
- * Platform Interface Implementation for RAK4631
+ * Platform Implementation for RAK4631
  * 
+ * This file implements platform-specific functionality for RAK4631.
  * This file is only compiled for RAK4631 builds (excluded for other platforms
  * via platformio.ini src_filter).
  */
@@ -47,7 +48,7 @@ int8_t platform_getRadioNssPin() {
 }
 
 int8_t platform_getRadioResetPin() {
-    return P_LORA_RESET;  // -1 (no reset pin)
+    return P_LORA_RESET;  // Pin 38 on RAK4631
 }
 
 int8_t platform_getRadioDio0Pin() {
@@ -68,4 +69,17 @@ int8_t platform_getRadioPowerEnablePin() {
 
 uint32_t platform_getSpiFrequency() {
     return SPI_FREQ;  // 8 MHz for RAK4631
+}
+
+// SX126x-specific configuration for RAK4631
+float platform_getTcxoVoltage() {
+    return SX126X_DIO3_TCXO_VOLTAGE;  // 1.8V TCXO on RAK4631 - CRITICAL!
+}
+
+bool platform_useDio2AsRfSwitch() {
+    return SX126X_DIO2_AS_RF_SWITCH;  // DIO2 controls antenna switch on RAK4631
+}
+
+bool platform_useRegulatorLDO() {
+    return false;  // RAK4631 uses DC-DC regulator (more efficient)
 }

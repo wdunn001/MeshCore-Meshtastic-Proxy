@@ -39,4 +39,9 @@ int8_t platform_getRadioPowerEnablePin();  // Power enable pin (-1 if not used)
 // SPI configuration
 uint32_t platform_getSpiFrequency();  // Returns SPI frequency in Hz for this platform
 
+// SX126x-specific configuration (return 0.0/false if not applicable)
+float platform_getTcxoVoltage();      // TCXO voltage (e.g., 1.8 for RAK4631, 0.0 if no TCXO)
+bool platform_useDio2AsRfSwitch();    // True if DIO2 controls RF switch (SX126x only)
+bool platform_useRegulatorLDO();      // True if LDO regulator should be used (false = DC-DC)
+
 #endif // PLATFORM_INTERFACE_H

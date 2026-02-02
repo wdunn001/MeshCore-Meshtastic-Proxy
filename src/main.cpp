@@ -9,18 +9,31 @@
 #include "platforms/platform_interface.h"
 #include "usb_comm.h"
 
+// ============================================================================
+// Protocol Architecture:
+// ============================================================================
+// The proxy uses a simple relay model:
+//   1. Listen continuously on ONE protocol (rx_protocol)
+//   2. When a packet is received, convert it to canonical format
+//   3. Retransmit to ALL protocols in tx_protocols[] (converted to their format)
+//
+// rx_protocol: The single protocol we're listening on (e.g., MeshCore)
+// tx_protocols[]: Array of protocols to retransmit to (e.g., Meshtastic)
+//                 Automatically excludes rx_protocol to avoid retransmitting to self
+// ============================================================================
+
 // Global state variables (accessible from usb_comm.cpp)
-ProtocolId rx_protocol = (ProtocolId)0;      // Currently listening protocol
-ProtocolId tx_protocols[PROTOCOL_COUNT];         // Protocols to transmit to (relay targets)
-uint8_t tx_protocol_count = 0;                   // Number of active transmit protocols
+ProtocolId rx_protocol = (ProtocolId)0;      // Currently listening protocol (ONE protocol)
+ProtocolId tx_protocols[PROTOCOL_COUNT];      // Protocols to transmit to (relay targets - MULTIPLE protocols)
+uint8_t tx_protocol_count = 0;                // Number of active transmit protocols
 unsigned long lastProtocolSwitch = 0;
 uint16_t protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
-bool autoSwitchEnabled = true;
+bool autoSwitchEnabled = false; // Auto-switch disabled - use manual RX protocol selection
 static ProtocolId lastConfiguredProtocol = PROTOCOL_COUNT; // Track last configured protocol to avoid spam
-uint8_t desiredProtocolMode = 2; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
-
-// Legacy ProtocolState for USB comm compatibility
-ProtocolState currentProtocol = LISTENING_MESHCORE;
+// desiredProtocolMode is kept in sync with rx_protocol for web interface compatibility
+// Since auto-switch is disabled, it always equals rx_protocol (0=MeshCore, 1=Meshtastic)
+uint8_t desiredProtocolMode = 0; // Will be set to match rx_protocol in setup()
+bool radioInitialized = false; // Track if radio initialized successfully
 
 // Protocol runtime state objects (one per protocol) - accessible from usb_comm.cpp
 ProtocolRuntimeState protocolStates[PROTOCOL_COUNT];
@@ -60,22 +73,58 @@ void configureProtocol(ProtocolId protocol) {
         return;
     }
     
+    // Track last failed protocol to avoid error spam
+    static ProtocolId lastFailedProtocol = PROTOCOL_COUNT;
+    
+    // Don't configure if radio not initialized
+    if (!radioInitialized) {
+        // Only send error once per protocol to avoid spam
+        // Check if USB is ready and buffer has space to avoid blocking
+        if (protocol != lastFailedProtocol && Serial.availableForWrite() > 60) {
+            char errorMsg[60];
+            snprintf(errorMsg, sizeof(errorMsg), "ERR: Radio not initialized - check SPI");
+            usbComm.sendError(errorMsg);
+            lastFailedProtocol = protocol;
+        }
+        return;
+    }
+    
+    // Reset failed protocol tracking when radio is initialized and we successfully configure
+    lastFailedProtocol = PROTOCOL_COUNT;
+    
     ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
     ProtocolConfig* config = protocol_manager_getConfig(protocol);
     
-    if (iface && config) {
-        // Configure radio - no debug log here (logged at protocol switch level instead)
+    if (iface && config && iface->configure != nullptr) {
+        // Configure radio - this is called from USB command handler or setup
+        // The protocol's configure() function should set radio to RX mode
         iface->configure(config);
         protocolStates[protocol].isActive = true;
         lastConfiguredProtocol = protocol; // Remember what we configured
         
         // Debug: Log when Meshtastic is configured (to help diagnose reception issues)
+        // Only send debug log if USB is ready (not during early setup)
         if (protocol == PROTOCOL_MESHTASTIC) {
-            char debugMsg[100];
-            snprintf(debugMsg, sizeof(debugMsg), "Meshtastic RX: %.3f MHz SF=%d BW=%d Sync=0x%02X", 
-                     config->frequencyHz / 1000000.0, config->spreadingFactor, config->bandwidth, config->syncWord);
-            usbComm.sendDebugLog(debugMsg);
+            // Check if USB buffer has space before sending debug log
+            if (Serial.availableForWrite() > 80) {
+                char debugMsg[100];
+                snprintf(debugMsg, sizeof(debugMsg), "Meshtastic RX: %.3f MHz SF=%d BW=%d Sync=0x%02X", 
+                         config->frequencyHz / 1000000.0, config->spreadingFactor, config->bandwidth, config->syncWord);
+                usbComm.sendDebugLog(debugMsg);
+            }
         }
+        
+        // Double-check: Ensure radio is in RX mode after configuration
+        // Some radio implementations might not set this automatically
+        // This is a safety measure - the protocol's configure() should already do this
+        radio_setMode(MODE_RX_CONTINUOUS);
+    } else {
+        // Invalid config - try to put radio in a safe state
+        if (radioInitialized) {
+            radio_setMode(MODE_STDBY);
+        }
+        // Don't send error during setup - might block USB
+        // Error will be handled elsewhere if needed
     }
 }
 
@@ -86,6 +135,20 @@ void update_tx_protocols(ProtocolId rx_protocol) {
         if (id != rx_protocol) {
             tx_protocols[tx_protocol_count++] = id;
         }
+    }
+    
+    // Debug: Log TX protocol update
+    if (tx_protocol_count > 0) {
+        char txMsg[80];
+        int offset = snprintf(txMsg, sizeof(txMsg), "TX protocols: ");
+        size_t maxOffset = sizeof(txMsg) - 20;
+        for (uint8_t i = 0; i < tx_protocol_count && (size_t)offset < maxOffset; i++) {
+            ProtocolInterfaceImpl* txIface = protocol_interface_get(tx_protocols[i]);
+            const char* txName = txIface && txIface->name ? txIface->name : "Unknown";
+            offset += snprintf(txMsg + offset, sizeof(txMsg) - offset, "%s%s", 
+                              i > 0 ? ", " : "", txName);
+        }
+        usbComm.sendDebugLog(txMsg);
     }
 }
 
@@ -104,9 +167,25 @@ void set_tx_protocols(uint8_t bitmask) {
 }
 
 void set_rx_protocol(ProtocolId protocol) {
+    // Validate protocol ID
+    if (protocol >= PROTOCOL_COUNT) {
+        char errorMsg[50];
+        snprintf(errorMsg, sizeof(errorMsg), "ERR: Invalid RX protocol %d", protocol);
+        usbComm.sendError(errorMsg);
+        return;
+    }
+    
+    // Don't change if already set to this protocol
+    if (rx_protocol == protocol && lastConfiguredProtocol == protocol) {
+        return; // Already configured for this protocol
+    }
+    
     // Set the listen protocol
     rx_protocol = protocol;
-    currentProtocol = (ProtocolState)protocol;
+    
+    // Since auto-switch is disabled, desiredProtocolMode always matches rx_protocol
+    // (kept for web interface compatibility)
+    desiredProtocolMode = (uint8_t)protocol;
     
     // Debug: Log RX protocol change
     ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
@@ -115,14 +194,18 @@ void set_rx_protocol(ProtocolId protocol) {
     snprintf(debugMsg, sizeof(debugMsg), "RX protocol set to: %s", protocolName);
     usbComm.sendDebugLog(debugMsg);
     
-    // DON'T auto-update TX protocols - user controls them explicitly via CMD_SET_TX_PROTOCOLS
-    // The set_tx_protocols() function already prevents TX on the same protocol as RX
+    // Auto-update TX protocols to retransmit to all other protocols
+    // This ensures packets are relayed to the other protocol when RX protocol changes
+    update_tx_protocols(rx_protocol);
     
     // Configure radio for new listen protocol
     // Force reconfiguration by resetting lastConfiguredProtocol
     lastConfiguredProtocol = PROTOCOL_COUNT;
     configureProtocol(protocol);
     lastProtocolSwitch = millis();
+    
+    // Note: configureProtocol() already sets radio to RX mode via protocol's configure() function
+    // No need to set it again here
 }
 
 bool receivePacket(uint8_t* buffer, uint8_t* len) {
@@ -279,18 +362,36 @@ void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
     
     state->stats.rxCount++;
     
+    // Debug: Log retransmission attempt
+    char relayMsg[60];
+    snprintf(relayMsg, sizeof(relayMsg), "Relaying to %d TX protocol(s)", tx_protocol_count);
+    usbComm.sendDebugLog(relayMsg);
+    
     // Relay to all other protocols using canonical format
     for (uint8_t i = 0; i < tx_protocol_count; i++) {
         ProtocolId targetProtocol = tx_protocols[i];
         
         // Safety check: Don't retransmit to the same protocol we received from
         if (targetProtocol == protocol) {
+            char skipMsg[50];
+            snprintf(skipMsg, sizeof(skipMsg), "Skipping TX to same protocol %d", targetProtocol);
+            usbComm.sendDebugLog(skipMsg);
             continue;
         }
         
         ProtocolInterfaceImpl* targetIface = protocol_interface_get(targetProtocol);
         
-        if (targetIface == nullptr || targetIface->convertFromCanonical == nullptr) {
+        if (targetIface == nullptr) {
+            char errMsg[50];
+            snprintf(errMsg, sizeof(errMsg), "ERR: No iface for TX proto %d", targetProtocol);
+            usbComm.sendDebugLog(errMsg);
+            continue;
+        }
+        
+        if (targetIface->convertFromCanonical == nullptr) {
+            char errMsg[60];
+            snprintf(errMsg, sizeof(errMsg), "ERR: No convertFromCanonical for TX proto %d", targetProtocol);
+            usbComm.sendDebugLog(errMsg);
             continue;
         }
         
@@ -298,8 +399,20 @@ void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
         uint8_t convertedLen = 0;
         if (!targetIface->convertFromCanonical(&canonical, txBuffer, &convertedLen)) {
             state->stats.conversionErrors++;
+            char convErrMsg[60];
+            snprintf(convErrMsg, sizeof(convErrMsg), "ERR: Convert fail %s (canon len=%d)", 
+                     targetIface->name ? targetIface->name : "Unknown", canonical.payloadLength);
+            usbComm.sendDebugLog(convErrMsg);
             continue;
         }
+        
+        // Debug: Log transmission attempt
+        ProtocolConfig* targetConfig = protocol_manager_getConfig(targetProtocol);
+        char txMsg[70];
+        snprintf(txMsg, sizeof(txMsg), "TX %s: %d bytes @ %.3f MHz", 
+                 targetIface->name ? targetIface->name : "Unknown", convertedLen,
+                 targetConfig ? targetConfig->frequencyHz / 1000000.0 : 0.0);
+        usbComm.sendDebugLog(txMsg);
         
         // Transmit to target protocol
         if (transmitPacket(targetProtocol, txBuffer, convertedLen)) {
@@ -308,6 +421,7 @@ void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
                 targetIface->updateStats(targetState, false, true, false, false);
             }
             platform_blinkLed(10);
+            usbComm.sendDebugLog("TX success");
         } else {
             usbComm.sendDebugLog("ERR: TX fail");
         }
@@ -328,8 +442,6 @@ void switchProtocol() {
         ProtocolId nextProtocol = (ProtocolId)((rx_protocol + 1) % PROTOCOL_COUNT);
         rx_protocol = nextProtocol;
         
-        // Update legacy ProtocolState for USB comm compatibility
-        currentProtocol = (ProtocolState)rx_protocol;
         
         // Update transmit protocol list
         update_tx_protocols(rx_protocol);
@@ -423,32 +535,23 @@ void setup() {
     
     // Wait for USB Serial connection (important for Arduino Leonardo/LoRa32u4II)
     // On boards with native USB, Serial might not be immediately available
-    // However, don't block forever - timeout after 3 seconds to allow operation without USB
+    // However, don't block forever - timeout after 1 second to allow operation without USB
     #ifdef ARDUINO_AVR_LEONARDO
         uint32_t serialWaitStart = millis();
-        while (!Serial && (millis() - serialWaitStart < 3000)) {
-            delay(10); // Wait for USB Serial to be ready (max 3 seconds)
+        while (!Serial && (millis() - serialWaitStart < 1000)) {
+            delay(10); // Wait for USB Serial to be ready (max 1 second)
         }
     #endif
     
-    delay(2000); // Give serial monitor time to connect
-    
-    Serial.println("MeshCore-Meshtastic Proxy Starting...");
+    // Minimal delay to allow USB to stabilize
+    delay(200); // Reduced from 2000ms to 200ms
     
     usbComm.init();
     
-    if (!radio_init()) {
-        Serial.println("ERROR: Radio initialization failed!");
-        usbComm.sendDebugLog("ERR: Radio init failed - check SPI connections");
-        while(1) {
-            platform_blinkLed(100);
-        }
-    }
+    // Process any early USB commands immediately
+    usbComm.process();
     
-    Serial.println("Radio initialized successfully");
-    radio_attachInterrupt(onPacketReceived);
-    
-    // Initialize protocol manager
+    // Initialize protocol manager first (sets up default configs)
     protocol_manager_init();
     
     // Initialize protocol states dynamically
@@ -456,61 +559,79 @@ void setup() {
         protocol_interface_initState(id, &protocolStates[id]);
     }
     
-    // Protocol configs are stored in protocolStates[].config and can be accessed
-    // via protocol_manager_getConfig() or directly from protocolStates[]
+    // Process USB commands before radio init (in case user wants to query device state)
+    usbComm.process();
     
-    // Disable auto-switch - always listen to MeshCore (protocol 0)
-    protocolSwitchIntervalMs = 0;
-    autoSwitchEnabled = false;
-    desiredProtocolMode = 0; // MeshCore
+    // Try to initialize radio - but don't block forever if it fails
+    // Radio init might take time, so process USB commands periodically
+    radioInitialized = radio_init();
     
-    // Set RX protocol to MeshCore (protocol 0)
-    rx_protocol = (ProtocolId)0; // MeshCore
-    currentProtocol = (ProtocolState)rx_protocol;
+    // Process USB commands after radio init attempt
+    usbComm.process();
     
-    // Set TX protocols to all protocols EXCEPT the RX protocol (retransmit to other protocols)
-    // Since we're listening on MeshCore, retransmit to Meshtastic
-    update_tx_protocols(rx_protocol);
-    
-    // Configure radio for listen protocol (MeshCore)
-    configureProtocol(rx_protocol);
-    lastProtocolSwitch = millis();
-    
-    // Print protocol information dynamically
-    Serial.println("Proxy ready. Listening for packets...");
-    Serial.println("Configured protocols:");
-    for (ProtocolId id = (ProtocolId)0; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
-        ProtocolInterfaceImpl* iface = protocol_interface_get(id);
-        ProtocolConfig* config = protocol_manager_getConfig(id);
-        
-        if (iface != nullptr && config != nullptr) {
-            Serial.print("  ");
-            Serial.print(iface->name);
-            Serial.print(" @ ");
-            Serial.print(config->frequencyHz / 1000000.0);
-            Serial.println(" MHz");
+    if (!radioInitialized) {
+        // Radio init failed - log error but continue to process USB commands
+        // Only send error if USB buffer has space
+        if (Serial.availableForWrite() > 60) {
+            usbComm.sendError("Radio initialization failed - check SPI connections");
         }
+        // Don't block - allow USB commands to be processed for diagnostics
+    } else {
+        radio_attachInterrupt(onPacketReceived);
+        
+        // Disable auto-switch - always listen to MeshCore (protocol 0)
+        protocolSwitchIntervalMs = 0;
+        autoSwitchEnabled = false;
+        
+        // Set RX protocol to MeshCore (protocol 0)
+        rx_protocol = (ProtocolId)0; // MeshCore
+        desiredProtocolMode = (uint8_t)rx_protocol;
+        
+        // Set TX protocols to all protocols EXCEPT the RX protocol
+        update_tx_protocols(rx_protocol);
+        
+        // Configure radio for listen protocol (MeshCore)
+        configureProtocol(rx_protocol);
+        lastProtocolSwitch = millis();
+        
+        // Process USB commands after configuration
+        usbComm.process();
     }
     
-    delay(1000);
-    // Send test messages for all transmit protocols (relay targets)
-    for (uint8_t i = 0; i < tx_protocol_count; i++) {
-        sendTestMessage(tx_protocols[i]);
-        delay(500);
-    }
+    // No delay at end - go straight to loop() to process USB commands
 }
 
 void loop() {
+    // ALWAYS process USB commands - even if radio failed
     usbComm.process();
     
-    // Auto-switch disabled - user controls RX/TX protocols via USB commands
-    // No automatic protocol switching - respect user's RX protocol selection
+    // If radio not initialized, just blink LED and process commands
+    if (!radioInitialized) {
+        static unsigned long lastBlink = 0;
+        static unsigned long lastErrorLog = 0;
+        unsigned long now = millis();
+        
+        // Blink LED to indicate error state
+        if (now - lastBlink > 500) {
+            lastBlink = now;
+            platform_blinkLed(50);
+        }
+        
+        // Periodically remind user of error (every 10 seconds)
+        if (now - lastErrorLog > 10000) {
+            lastErrorLog = now;
+            usbComm.sendError("Radio not initialized - check SPI connections");
+        }
+        
+        delay(10);
+        return;
+    }
     
-    // Check for packet via polling (backup to interrupt)
+    // Normal operation - radio is working
     static unsigned long lastDebugLog = 0;
     unsigned long now = millis();
     
-    // Debug: Log current listening state every 30 seconds (reduced frequency to avoid browser issues)
+    // Debug: Log current listening state every 30 seconds
     if (now - lastDebugLog > 30000) {
         lastDebugLog = now;
         ProtocolInterfaceImpl* rxIface = protocol_interface_get(rx_protocol);
@@ -524,6 +645,7 @@ void loop() {
         }
     }
     
+    // Check for packets
     if (radio_isPacketReceived()) {
         packetReceived = true;
     }
@@ -572,9 +694,6 @@ void loop() {
             configureProtocol(rx_protocol);
         }
     }
-    
-    // Statistics are sent via RESP_STATS when requested by the client
-    // No need to send debug log statistics periodically - they're redundant
     
     delay(1);
 }

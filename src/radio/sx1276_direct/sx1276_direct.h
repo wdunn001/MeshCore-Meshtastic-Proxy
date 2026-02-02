@@ -51,6 +51,14 @@
 #define SX1276_MIN_FREQUENCY_HZ  137000000UL
 #define SX1276_MAX_FREQUENCY_HZ 1020000000UL
 
+// LNA configuration (REG_LNA = 0x0C)
+#define LNA_GAIN_1               0b00100000  // Max gain (bits 7-5)
+#define LNA_BOOST_ON             0b00000011  // 150% LNA current (bits 1-0) - CRITICAL for sensitivity!
+
+// MODEM_CONFIG_3 (0x26) bits
+#define AGC_AUTO_ON              0b00000100  // Bit 2: Enable AGC auto (CRITICAL for RX!)
+#define LOW_DATA_RATE_OPTIMIZE   0b00001000  // Bit 3: Enable for SF11/SF12 with low BW
+
 // Function Prototypes (internal implementation)
 bool sx1276_direct_init();
 uint32_t sx1276_direct_getMinFrequency();

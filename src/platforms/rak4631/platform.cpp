@@ -22,11 +22,10 @@ const uint32_t g_ADigitalPinMap[] = {
  32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47
 };
 
-// SPI object definition for nRF52
+// SPI object definition for nRF52 - using LoRa SPI pins!
 // SPIClass constructor: SPIClass(NRF_SPIM_Type *p_spi, uint8_t uc_pinMISO, uint8_t uc_pinSCK, uint8_t uc_pinMOSI)
-// RAK4631 default SPI pins (from WisBlock connector): SCK=13, MOSI=12, MISO=14
+// RAK4631 LoRa SPI pins: MISO=45, SCK=43, MOSI=44 (from Meshtastic variant.h)
 // Using NRF_SPIM0 as the SPI peripheral
-// Note: This file is only compiled for RAK4631 builds, so SPI will be available at link time
-SPIClass SPI(NRF_SPIM0, 14, 13, 12);
+SPIClass SPI(NRF_SPIM0, PIN_LORA_MISO, PIN_LORA_SCK, PIN_LORA_MOSI);
 
 #endif // RAK4631_BOARD
