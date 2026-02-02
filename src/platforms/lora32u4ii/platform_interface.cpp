@@ -7,7 +7,6 @@
 
 #include "../platform_interface.h"
 #include "config.h"
-#include "../../radio/sx1276_direct/config.h"  // Radio pin definitions
 #include <Arduino.h>
 
 void platform_init() {
@@ -43,19 +42,19 @@ uint32_t platform_getSerialBaud() {
 
 // Radio pin configuration for SX1276 (LoRa32u4II uses SX1276)
 int8_t platform_getRadioNssPin() {
-    return SX1276_SS;  // Pin 8
+    return RADIO_NSS_PIN;
 }
 
 int8_t platform_getRadioResetPin() {
-    return SX1276_RESET;  // Pin 4
+    return RADIO_RESET_PIN;
 }
 
 int8_t platform_getRadioDio0Pin() {
-    return SX1276_DIO0;  // Pin 7
+    return RADIO_DIO0_PIN;
 }
 
 int8_t platform_getRadioDio1Pin() {
-    return SX1276_DIO1;  // Pin 5
+    return RADIO_DIO1_PIN;
 }
 
 int8_t platform_getRadioBusyPin() {

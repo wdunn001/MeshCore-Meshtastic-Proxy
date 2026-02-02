@@ -107,3 +107,11 @@ uint8_t radio_getPacketLength() {
 void radio_clearIrqFlags() { 
     sx1276_direct_clearIrqFlags(); 
 }
+
+uint16_t radio_getIrqFlags() { 
+    return sx1276_direct_getIrqFlags(); 
+}
+
+bool radio_hasPacketErrors() { 
+    return sx1276_direct_hasPacketErrors(); 
+}

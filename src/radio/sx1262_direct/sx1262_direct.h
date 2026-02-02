@@ -92,6 +92,12 @@ int8_t sx1262_direct_getSnr();
 uint8_t sx1262_direct_readRegister(uint8_t reg);
 void sx1262_direct_writeRegister(uint8_t reg, uint8_t value);
 void sx1262_direct_attachInterrupt(void (*handler)());
+
+// Get IRQ status flags (returns 16-bit value: MSB in [0], LSB in [1])
+uint16_t sx1262_direct_getIrqFlags();
+
+// Check if received packet has CRC or header errors
+bool sx1262_direct_hasPacketErrors();
 bool sx1262_direct_isPacketReceived();
 uint8_t sx1262_direct_getPacketLength();
 void sx1262_direct_clearIrqFlags();

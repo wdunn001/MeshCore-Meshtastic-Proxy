@@ -41,7 +41,8 @@ const Protocol = {
             currentProtocol: data[12], // 0 = MeshCore, 1 = Meshtastic
             meshcoreBandwidth: data[13],
             meshtasticBandwidth: data[14],
-            desiredProtocolMode: data[15] // 0 = MeshCore, 1 = Meshtastic, 2 = Auto-Switch
+            desiredProtocolMode: data[15], // 0 = MeshCore, 1 = Meshtastic, 2 = Auto-Switch
+            platformId: data[16] // 0 = LoRa32u4II, 1 = RAK4631 (was reserved byte, now platform ID)
         };
     },
 

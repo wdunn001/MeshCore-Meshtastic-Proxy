@@ -380,14 +380,24 @@ void sx1262_direct_writeFifo(uint8_t* data, uint8_t len) {
 }
 
 void sx1262_direct_readFifo(uint8_t* data, uint8_t len) {
-    // Get RX buffer status first to know packet length
+    // Get RX buffer status to get offset (we already have length from getPacketLength)
     uint8_t rxStatus[2];
     sx1262_readCommand(CMD_GET_RX_BUFFER_STATUS, rxStatus, 2);
     
-    uint8_t packetLen = rxStatus[0]; // Payload length
-    uint8_t offset = rxStatus[1];    // RX start buffer pointer
+    uint8_t rxPacketLen = rxStatus[0]; // Payload length from RX buffer status
+    uint8_t offset = rxStatus[1];      // RX start buffer pointer
     
-    if (packetLen == 0 || packetLen > len) {
+    // Use the length passed in (from getPacketLength) - it's already validated
+    // Only use RX buffer status length if it's valid and matches (for verification)
+    uint8_t packetLen = len;
+    if (rxPacketLen != 0 && rxPacketLen != 255 && rxPacketLen == len) {
+        // RX buffer status matches our length - good, use it
+        packetLen = rxPacketLen;
+    } else if (rxPacketLen == 255 || rxPacketLen == 0) {
+        // RX buffer status is corrupted - trust the length parameter instead
+        packetLen = len;
+    } else if (rxPacketLen > len) {
+        // RX buffer status says more data than expected - clamp to our length
         packetLen = len;
     }
     
@@ -418,10 +428,11 @@ void sx1262_direct_readFifo(uint8_t* data, uint8_t len) {
     last_rssi = -(status[0] / 2); // RSSI in dBm
     last_snr = ((int8_t)status[1]) / 4; // SNR in dB
     
+    // Save packet length BEFORE clearing IRQ flags (which resets last_packet_length)
     last_packet_length = packetLen;
     
-    // Clear IRQ flags
-    sx1262_direct_clearIrqFlags();
+    // Note: Don't clear IRQ flags here - let the caller do it after getting the length
+    // Clearing here would reset last_packet_length to 0, making getPacketLength() fail
     
     // Restart RX if we were in RX mode
     if (current_mode == 0x05) {
@@ -442,9 +453,16 @@ int8_t sx1262_direct_getSnr() {
 }
 
 uint8_t sx1262_direct_getPacketLength() {
-    // SX1262 doesn't have a direct packet length register
-    // We track it in readFifo
-    return last_packet_length;
+    // Always read RX buffer status directly (like RadioLib does)
+    // Don't rely on cached value as it may be stale
+    uint8_t rxStatus[2];
+    sx1262_readCommand(CMD_GET_RX_BUFFER_STATUS, rxStatus, 2);
+    uint8_t packetLen = rxStatus[0]; // Payload length
+    
+    // Update cache for consistency
+    last_packet_length = packetLen;
+    
+    return packetLen;
 }
 
 bool sx1262_direct_isPacketReceived() {
@@ -462,6 +480,7 @@ void sx1262_direct_clearIrqFlags() {
     uint8_t clearIrq[2] = {0xFF, 0xFF}; // Clear all IRQs
     sx1262_sendCommand(CMD_CLEAR_IRQ_STATUS, clearIrq, 2);
     packet_received_flag = false;
+    last_packet_length = 0; // Reset cached length after clearing IRQ
 }
 
 void sx1262_direct_attachInterrupt(void (*handler)()) {
@@ -469,6 +488,26 @@ void sx1262_direct_attachInterrupt(void (*handler)()) {
     if (pin_dio1 >= 0) {
         attachInterrupt(digitalPinToInterrupt(pin_dio1), sx1262_irq_handler, RISING);
     }
+}
+
+uint16_t sx1262_direct_getIrqFlags() {
+    uint8_t irqStatus[2];
+    sx1262_readCommand(CMD_GET_IRQ_STATUS, irqStatus, 2);
+    // Return 16-bit IRQ status: MSB in [0], LSB in [1]
+    return ((uint16_t)irqStatus[0] << 8) | irqStatus[1];
+}
+
+bool sx1262_direct_hasPacketErrors() {
+    uint16_t irqFlags = sx1262_direct_getIrqFlags();
+    // Check CRC error (bit 6 in LSB = 0x0040) and header error (bit 5 in LSB = 0x0020)
+    // IRQ flags: [MSB][LSB], errors are in LSB byte
+    if (irqFlags & 0x0040) { // IRQ_CRC_ERROR
+        return true; // CRC error - packet corrupted
+    }
+    if (irqFlags & 0x0020) { // IRQ_HEADER_ERROR
+        return true; // Header error - packet corrupted
+    }
+    return false; // No errors detected
 }
 
 uint8_t sx1262_direct_readRegister(uint8_t reg) {

@@ -168,15 +168,17 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
                 if (newInterval == 0) {
                     protocolSwitchIntervalMs = 0;
                     autoSwitchEnabled = false;
-                    // When disabling auto-switch, enforce desired protocol mode
-                    if (desiredProtocolMode < PROTOCOL_COUNT) {
-                        setProtocol((ProtocolState)desiredProtocolMode);
-                    }
+                    // When disabling auto-switch, use current rx_protocol (not desiredProtocolMode which might be 2)
+                    // The rx_protocol should already be set correctly via CMD_SET_RX_PROTOCOL
+                    // Just ensure it's configured properly
+                    configureProtocol(rx_protocol);
                     sendDebugLog("Manual mode");
                 } else if (newInterval >= PROTOCOL_SWITCH_INTERVAL_MS_MIN && 
                            newInterval <= PROTOCOL_SWITCH_INTERVAL_MS_MAX) {
                     protocolSwitchIntervalMs = newInterval;
                     autoSwitchEnabled = true;
+                    // Update desiredProtocolMode to 2 (auto-switch) when enabling
+                    desiredProtocolMode = 2;
                     char msg[50];
                     snprintf(msg, sizeof(msg), "Switch interval set to %d ms", newInterval);
                     sendDebugLog(msg);
@@ -245,6 +247,8 @@ void USBComm::handleCommand(uint8_t cmd, uint8_t* data, uint8_t len) {
                 ProtocolId rxProtocol = (ProtocolId)data[0];
                 if (rxProtocol < PROTOCOL_COUNT) {
                     set_rx_protocol(rxProtocol);
+                    // Update desiredProtocolMode to match RX protocol (for manual mode)
+                    desiredProtocolMode = rxProtocol;
                     ProtocolInterfaceImpl* iface = protocol_interface_get(rxProtocol);
                     if (iface != nullptr) {
                         char msg[40];
@@ -353,7 +357,13 @@ void USBComm::sendInfo() {
     *p++ = firstBw;
     *p++ = secondBw;
     *p++ = desiredProtocolMode; // 0=First protocol, 1=Second protocol, 2=Auto-Switch
-    *p++ = 0; // Reserved
+    
+    // Platform ID: 0 = LoRa32u4II, 1 = RAK4631
+    #ifdef RAK4631_BOARD
+        *p++ = 1; // RAK4631
+    #else
+        *p++ = 0; // LoRa32u4II (default)
+    #endif
     
     sendResponse(RESP_INFO_REPLY, info, 18);
 }

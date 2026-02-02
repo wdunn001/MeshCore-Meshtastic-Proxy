@@ -14,6 +14,10 @@ class App {
             };
         }
         
+        // Load stats update rate from localStorage or use default
+        const savedStatsRate = localStorage.getItem('statsUpdateRate');
+        const defaultStatsRate = savedStatsRate ? parseInt(savedStatsRate, 10) : 1000;
+        
         this.state = {
             connected: false,
             protocols: protocolState, // Generic protocol state array
@@ -21,6 +25,7 @@ class App {
             tx_protocols: [], // Array of transmit protocol IDs
             currentProtocol: 0, // Legacy compatibility
             switchInterval: 100,
+            statsUpdateRate: defaultStatsRate, // Configurable stats update rate (ms)
             conversionErrors: 0,
             lastPacket: null,
             lastActivityTime: null,
@@ -29,7 +34,8 @@ class App {
             connectionStartTime: null,
             firmwareInfoLogged: false,
             controlsFormDirty: false,
-            infoReceived: false
+            infoReceived: false,
+            platform: null // Platform name (e.g., "LoRa32u4II", "RAK4631")
         };
         
         this.statsInterval = null;
@@ -48,8 +54,24 @@ class App {
         window.UI.updateConnectionStatus(false);
         window.UI.enableButtons(false);
         
+        // Initialize stats update rate display
+        const statsUpdateRateInput = document.getElementById('statsUpdateRateInput');
+        const statsUpdateRateDisplay = document.getElementById('statsUpdateRateDisplay');
+        if (statsUpdateRateInput && statsUpdateRateDisplay) {
+            statsUpdateRateInput.value = this.state.statsUpdateRate;
+            statsUpdateRateDisplay.textContent = `Current: ${this.state.statsUpdateRate}ms`;
+        }
+        
         // Initialize control visibility
         this.updateControlVisibility();
+        
+        // Initialize statistics charts (after ProtocolRegistry is loaded)
+        // Use setTimeout to ensure ProtocolRegistry is available
+        setTimeout(() => {
+            if (window.Statistics && window.ProtocolRegistry) {
+                window.Statistics.init();
+            }
+        }, 100);
     }
 
     setupEventListeners() {
@@ -67,29 +89,105 @@ class App {
         });
         
         // Mark form as dirty when controls are edited
-        document.getElementById('protocolSelect').addEventListener('change', () => {
-            this.state.controlsFormDirty = true;
-            this.updateControlVisibility();
-        });
+        // protocolSelect removed - auto-switch removed from UI
         document.getElementById('listenProtocolSelect').addEventListener('change', () => {
             this.state.controlsFormDirty = true;
             this.updateTransmitProtocolsFromListen();
+            // Update display after visibility changes
+            window.UI.updateTransmitProtocolsDisplay();
+            // Mark form as dirty since TX protocols may have been auto-checked
+            this.state.controlsFormDirty = true;
         });
         // Setup transmit protocol checkbox listeners dynamically
         for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
             const checkbox = document.getElementById(`transmitProtocol${i}`);
             if (checkbox) {
                 checkbox.addEventListener('change', () => {
-                    this.state.controlsFormDirty = true;
+                    // Only mark dirty if checkbox is enabled (not auto-checked/disabled)
+                    if (!checkbox.disabled) {
+                        this.state.controlsFormDirty = true;
+                        
+                        // If checkbox is checked, sync RX protocol to match TX protocol
+                        // This ensures the device can receive its own transmissions
+                        if (checkbox.checked) {
+                            const listenProtocolSelect = document.getElementById('listenProtocolSelect');
+                            if (listenProtocolSelect) {
+                                const currentRxProtocol = parseInt(listenProtocolSelect.value);
+                                const txProtocolId = i;
+                                
+                                // Only change RX if it's different from the TX protocol
+                                if (currentRxProtocol !== txProtocolId) {
+                                    listenProtocolSelect.value = txProtocolId.toString();
+                                    // Update visibility and auto-check logic
+                                    this.updateTransmitProtocolsFromListen();
+                                    // Update display
+                                    window.UI.updateTransmitProtocolsDisplay();
+                                    window.UI.updateListenProtocol(txProtocolId);
+                                    
+                                    // Log the sync action
+                                    const protocolName = window.ProtocolRegistry.getName(txProtocolId);
+                                    window.UI.addLogEntry(`RX protocol synced to ${protocolName} to match TX selection`, 'info');
+                                }
+                            }
+                        } else {
+                            // If checkbox is unchecked, check if we need to sync RX to another checked TX protocol
+                            const listenProtocolSelect = document.getElementById('listenProtocolSelect');
+                            if (listenProtocolSelect) {
+                                const currentRxProtocol = parseInt(listenProtocolSelect.value);
+                                
+                                // Find the first checked TX protocol
+                                let firstCheckedTx = null;
+                                for (let j = 0; j < window.ProtocolRegistry.PROTOCOL_COUNT; j++) {
+                                    const txCheckbox = document.getElementById(`transmitProtocol${j}`);
+                                    if (txCheckbox && txCheckbox.checked && !txCheckbox.disabled) {
+                                        firstCheckedTx = j;
+                                        break;
+                                    }
+                                }
+                                
+                                // If RX matches the unchecked protocol and there's another checked TX, sync to it
+                                if (currentRxProtocol === i && firstCheckedTx !== null && firstCheckedTx !== currentRxProtocol) {
+                                    listenProtocolSelect.value = firstCheckedTx.toString();
+                                    this.updateTransmitProtocolsFromListen();
+                                    window.UI.updateTransmitProtocolsDisplay();
+                                    window.UI.updateListenProtocol(firstCheckedTx);
+                                    
+                                    const protocolName = window.ProtocolRegistry.getName(firstCheckedTx);
+                                    window.UI.addLogEntry(`RX protocol synced to ${protocolName} to match TX selection`, 'info');
+                                }
+                            }
+                        }
+                    }
+                    // Update display when checkbox changes
+                    window.UI.updateTransmitProtocolsDisplay();
                 });
             }
         }
-        document.getElementById('switchIntervalInput').addEventListener('input', () => {
-            this.state.controlsFormDirty = true;
-        });
-        document.getElementById('switchIntervalInput').addEventListener('change', () => {
-            this.state.controlsFormDirty = true;
-        });
+        // Removed switchIntervalInput event listeners - auto-switch removed from UI
+        
+        // Stats update rate input (not part of form submission, saves immediately)
+        const statsUpdateRateInput = document.getElementById('statsUpdateRateInput');
+        if (statsUpdateRateInput) {
+            statsUpdateRateInput.value = this.state.statsUpdateRate;
+            statsUpdateRateInput.addEventListener('input', () => {
+                const value = parseInt(statsUpdateRateInput.value, 10);
+                const minRate = 10; // USB max rate
+                const maxRate = 10000;
+                const clampedValue = Math.max(minRate, Math.min(maxRate, value));
+                this.state.statsUpdateRate = clampedValue;
+                statsUpdateRateInput.value = clampedValue;
+                document.getElementById('statsUpdateRateDisplay').textContent = `Current: ${clampedValue}ms`;
+                
+                // Save to localStorage
+                localStorage.setItem('statsUpdateRate', clampedValue.toString());
+                
+                // Restart stats polling with new rate if connected
+                if (this.state.connected) {
+                    this.stopStatsPolling();
+                    this.startStatsPolling();
+                }
+            });
+        }
         
         // Protocol parameter change handlers
         document.getElementById('meshcoreFreqInput').addEventListener('change', () => this.saveMeshCoreParams());
@@ -115,6 +213,7 @@ class App {
             this.state.firmwareInfoLogged = false; // Reset so we log firmware info on reconnect
             this.state.controlsFormDirty = false; // Reset dirty flag on new connection
             this.state.infoReceived = false; // Reset info received flag
+            this.state.platform = null; // Reset platform - will be set when info is received
             window.UI.updateConnectionStatus(true);
             window.UI.enableButtons(true);
             window.UI.addLogEntry('Connected successfully', 'success');
@@ -186,6 +285,7 @@ class App {
         this.state.firmwareInfoLogged = false; // Reset for next connection
         this.state.controlsFormDirty = false; // Reset dirty flag on disconnect
         this.state.infoReceived = false; // Reset info received flag on disconnect
+        this.state.platform = null; // Reset platform on disconnect
         
         try {
             await window.serialComm.disconnect();
@@ -200,17 +300,26 @@ class App {
 
     startStatsPolling() {
         let infoRequestCount = 0;
-        // Poll stats every second, request info every 5 seconds to track protocol switches
+        // Use configurable stats update rate (default 1000ms, minimum 10ms for USB max rate)
+        const statsRate = this.state.statsUpdateRate || 1000;
+        const minRate = 10; // Minimum 10ms (100 updates/sec) - USB CDC can handle this
+        const actualRate = Math.max(statsRate, minRate);
+        
+        // Calculate how many stats requests before info request (info every 5 seconds)
+        const infoInterval = 5000; // Request info every 5 seconds
+        const infoRequestEvery = Math.max(1, Math.floor(infoInterval / actualRate));
+        
+        // Poll stats at configured rate, request info every 5 seconds to update current protocol status
         this.statsInterval = setInterval(() => {
             if (this.state.connected) {
                 window.serialComm.getStats();
-                // Request info every 5 seconds to update current protocol status
-                if (++infoRequestCount >= 5) {
+                // Request info periodically to update current protocol status
+                if (++infoRequestCount >= infoRequestEvery) {
                     window.serialComm.getInfo();
                     infoRequestCount = 0;
                 }
             }
-        }, 1000);
+        }, actualRate);
     }
 
     stopStatsPolling() {
@@ -221,12 +330,12 @@ class App {
     }
 
     startStatusUpdates() {
-        // Update status every 500ms for real-time feedback
+        // Update status every 100ms for real-time feedback
         this.statusUpdateInterval = setInterval(() => {
             if (this.state.connected) {
                 this.updateStatus();
             }
-        }, 500);
+        }, 100);
     }
 
     stopStatusUpdates() {
@@ -266,6 +375,7 @@ class App {
         this.state.lastProtocol = this.state.currentProtocol;
         
         // Update device status
+        // Auto-switch removed - always show listening status
         let activity = 'Idle';
         if (this.state.lastPacket && this.state.lastPacket.timestamp) {
             const timeSincePacket = now - this.state.lastPacket.timestamp;
@@ -307,11 +417,17 @@ class App {
             }
         }
         
-        window.UI.updateDeviceStatus(activity, uptime, this.state.protocolSwitches, lastActivity);
+        // Get platform name
+        const platformName = this.state.platform || '--';
+        window.UI.updateDeviceStatus(activity, uptime, this.state.protocolSwitches, lastActivity, platformName);
     }
 
     async resetStats() {
         await window.serialComm.resetStats();
+        // Reset chart history
+        if (window.Statistics) {
+            window.Statistics.reset();
+        }
         window.UI.addLogEntry('Statistics reset', 'info');
     }
 
@@ -329,40 +445,27 @@ class App {
     }
 
     updateControlVisibility() {
-        const protocolSelect = document.getElementById('protocolSelect');
+        // Auto-switch removed - always show listen and transmit protocol controls
         const listenProtocolGroup = document.getElementById('listenProtocolGroup');
         const transmitProtocolsGroup = document.getElementById('transmitProtocolsGroup');
-        const switchIntervalGroup = document.getElementById('switchIntervalGroup');
-        const isAutoSwitch = protocolSelect ? parseInt(protocolSelect.value) === 2 : false;
         
-        // Show/hide groups based on mode
+        // Always show these groups (auto-switch removed)
         if (listenProtocolGroup) {
-            listenProtocolGroup.style.display = isAutoSwitch ? 'none' : 'block';
+            listenProtocolGroup.style.display = 'block';
         }
         if (transmitProtocolsGroup) {
-            transmitProtocolsGroup.style.display = isAutoSwitch ? 'none' : 'block';
-        }
-        if (switchIntervalGroup) {
-            switchIntervalGroup.style.display = isAutoSwitch ? 'block' : 'none';
+            transmitProtocolsGroup.style.display = 'block';
         }
         
-        // Enable/disable controls
+        // Enable/disable controls based on connection state only
         const listenProtocolSelect = document.getElementById('listenProtocolSelect');
-        const intervalInput = document.getElementById('switchIntervalInput');
         
         if (listenProtocolSelect) {
-            listenProtocolSelect.disabled = !this.state.connected || isAutoSwitch;
+            listenProtocolSelect.disabled = !this.state.connected;
         }
-        // Enable/disable transmit protocol checkboxes dynamically
-        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
-            const checkbox = document.getElementById(`transmitProtocol${i}`);
-            if (checkbox) {
-                checkbox.disabled = !this.state.connected || isAutoSwitch;
-            }
-        }
-        if (intervalInput) {
-            intervalInput.disabled = !this.state.connected || !isAutoSwitch;
-        }
+        
+        // Update transmit protocol checkboxes (visibility, auto-check if only one, enable/disable)
+        this.updateTransmitProtocolsFromListen();
     }
 
     updateTransmitProtocolsFromListen() {
@@ -371,60 +474,94 @@ class App {
         
         const listenProtocol = parseInt(listenProtocolSelect.value);
         
-        // Auto-set transmit protocols to all except listen protocol (dynamic)
+        // Count visible TX protocol options
+        let visibleCount = 0;
+        let visibleCheckbox = null;
+        
+        // Hide/show checkboxes based on listen protocol
         for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
             const checkbox = document.getElementById(`transmitProtocol${i}`);
-            if (checkbox) {
-                checkbox.checked = (listenProtocol !== i);
+            const label = checkbox ? checkbox.closest('label.checkbox-label') : null;
+            
+            if (checkbox && label) {
+                if (listenProtocol === i) {
+                    // Hide the checkbox for the listen protocol
+                    label.style.display = 'none';
+                    // Uncheck if it was checked (to prevent TX on same protocol as RX)
+                    if (checkbox.checked) {
+                        checkbox.checked = false;
+                    }
+                    checkbox.disabled = true;
+                } else {
+                    // Show the checkbox
+                    label.style.display = '';
+                    visibleCount++;
+                    visibleCheckbox = checkbox;
+                }
+            }
+        }
+        
+        // If only one TX protocol option is available, auto-check and disable it
+        if (visibleCount === 1 && visibleCheckbox) {
+            visibleCheckbox.checked = true;
+            visibleCheckbox.disabled = true;
+        } else {
+            // Multiple options available - enable checkboxes and let user choose
+            for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+                const checkbox = document.getElementById(`transmitProtocol${i}`);
+                const label = checkbox ? checkbox.closest('label.checkbox-label') : null;
+                
+                if (checkbox && label && label.style.display !== 'none') {
+                    checkbox.disabled = !this.state.connected;
+                }
             }
         }
     }
 
     async saveSettings() {
-        const protocolSelect = document.getElementById('protocolSelect');
         const listenProtocolSelect = document.getElementById('listenProtocolSelect');
-        const intervalInput = document.getElementById('switchIntervalInput');
         
-        const protocolMode = parseInt(protocolSelect.value);
+        // Manual mode only - set listen protocol and transmit protocols
+        const listenProtocol = parseInt(listenProtocolSelect.value);
+        const protocolName = window.ProtocolRegistry.getName(listenProtocol);
+        window.UI.addLogEntry(`Setting RX protocol to ${protocolName}...`, 'info');
+        await window.serialComm.setRxProtocol(listenProtocol);
+        this.state.rx_protocol = listenProtocol;
+        this.state.currentProtocol = listenProtocol;
         
-        if (protocolMode === 2) {
-            // Auto-switch mode - use interval value
-            const interval = parseInt(intervalInput.value);
-            if (interval !== this.state.switchInterval) {
-                window.UI.addLogEntry(`Setting switch interval to ${interval}ms...`, 'info');
-                await window.serialComm.setSwitchInterval(interval);
-                this.state.switchInterval = interval;
+        // Build transmit protocol bitmask dynamically
+        let txBitmask = 0;
+        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox && checkbox.checked) {
+                txBitmask |= (1 << i); // Set bit for protocol ID
             }
-            // Set protocol mode to auto-switch (value 2)
-            await window.serialComm.setProtocol(2);
-            window.UI.addLogEntry('Auto-switching enabled', 'info');
-        } else {
-            // Manual mode - set listen protocol, transmit protocols, and disable auto-switch
-            const listenProtocol = parseInt(listenProtocolSelect.value);
-            const protocolName = window.ProtocolRegistry.getName(listenProtocol);
-            window.UI.addLogEntry(`Setting RX protocol to ${protocolName}...`, 'info');
-            await window.serialComm.setRxProtocol(listenProtocol);
-            
-            // Build transmit protocol bitmask dynamically
-            let txBitmask = 0;
-            for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
-                const checkbox = document.getElementById(`transmitProtocol${i}`);
-                if (checkbox && checkbox.checked) {
-                    txBitmask |= (1 << i); // Set bit for protocol ID
-                }
-            }
-            
-            window.UI.addLogEntry(`Setting TX protocols (bitmask: 0x${txBitmask.toString(16).padStart(2, '0')})...`, 'info');
-            await window.serialComm.setTxProtocols(txBitmask);
-            
-            // Set interval to 0 to disable auto-switch
-            await window.serialComm.setSwitchInterval(0);
-            this.state.switchInterval = 0;
         }
+        
+        window.UI.addLogEntry(`Setting TX protocols (bitmask: 0x${txBitmask.toString(16).padStart(2, '0')})...`, 'info');
+        await window.serialComm.setTxProtocols(txBitmask);
+        
+        // Ensure auto-switch is disabled
+        await window.serialComm.setSwitchInterval(0);
+        this.state.switchInterval = 0;
+        
+        // Update UI immediately
+        window.UI.updateListenProtocol(listenProtocol);
+        // Update visibility of transmit protocol checkboxes (hide listen protocol checkbox)
+        this.updateTransmitProtocolsFromListen();
+        // Update display to show current checkbox states
+        window.UI.updateTransmitProtocolsDisplay();
         
         // Reset dirty flag after saving
         this.state.controlsFormDirty = false;
         window.UI.addLogEntry('Settings saved', 'info');
+        
+        // Request fresh info from device after a short delay to confirm settings were applied
+        setTimeout(() => {
+            if (this.state.connected) {
+                window.serialComm.getInfo();
+            }
+        }, 200);
     }
 
     cancelSettings() {
@@ -485,19 +622,20 @@ class App {
                     this.state.currentProtocol = info.currentProtocol; // Legacy compatibility
                     this.state.switchInterval = info.switchInterval;
                     
-                    // Use desiredProtocolMode from device if available, otherwise infer from switchInterval
-                    const protocolMode = info.desiredProtocolMode !== undefined 
-                        ? info.desiredProtocolMode 
-                        : (info.switchInterval === 0 ? info.currentProtocol : 2);
+                    // Extract and store platform information
+                    if (info.platformId !== undefined) {
+                        // Platform ID: 0 = LoRa32u4II, 1 = RAK4631
+                        this.state.platform = info.platformId === 1 ? 'RAK4631' : 'LoRa32u4II';
+                    }
                     
-                    // Determine what protocol mode will be set in dropdown
+                    // Auto-switch removed - always manual mode
+                    const protocolMode = 0; // Always manual mode
                     const rxProtocolName = window.ProtocolRegistry.getName(info.currentProtocol);
-                    const protocolModeText = protocolMode === 2 
-                        ? `Auto-Switch (${info.switchInterval}ms)` 
-                        : `Manual (${rxProtocolName})`;
+                    const protocolModeText = `Manual (${rxProtocolName})`;
                     
                     // Single consolidated log message with all device status
                     const status = {
+                        platform: this.state.platform || 'Unknown',
                         rx_protocol: rxProtocolName,
                         switchInterval: info.switchInterval,
                         desiredProtocolMode: protocolMode,
@@ -509,28 +647,32 @@ class App {
                     }
                     console.log('Device Status:', status);
                     
+                    // Update device status panel with platform info
+                    this.updateStatus();
+                    
                     window.UI.updateFrequencies(info.meshcoreFreq, info.meshtasticFreq);
                     window.UI.updateProtocolStatus(info.currentProtocol);
                     // Only update form fields if form is not dirty
                     if (!this.state.controlsFormDirty) {
-                        window.UI.updateSwitchInterval(info.switchInterval);
-                        window.UI.updateProtocolSelect(protocolMode, info.switchInterval);
                         window.UI.updateListenProtocol(info.currentProtocol);
-                        window.UI.updateTransmitProtocols(info.currentProtocol);
+                        // Update visibility of transmit protocol checkboxes (hide listen protocol checkbox)
+                        // Don't change checkbox states - we don't have TX protocol bitmask from device
+                        this.updateTransmitProtocolsFromListen();
                         window.UI.updateProtocolParams(info.meshcoreFreq, info.meshcoreBandwidth, info.meshtasticFreq, info.meshtasticBandwidth);
+                        // Update display text based on current checkbox states
+                        window.UI.updateTransmitProtocolsDisplay();
+                    } else {
+                        // Form is dirty - just update display text to reflect current checkbox states
+                        window.UI.updateTransmitProtocolsDisplay();
                     }
                     
-                    // Update control visibility and enabled state based on protocol mode
+                    // Update control visibility and enabled state
                     this.updateControlVisibility();
                     
                     // Only log firmware info once on first connection
                     if (!this.state.firmwareInfoLogged) {
-                        const intervalText = info.switchInterval === 0 ? 'Off (Manual)' : `${info.switchInterval}ms`;
                         const rxProtocolName = window.ProtocolRegistry.getName(info.currentProtocol);
-                        const protocolModeTextLog = protocolMode === 2 
-                            ? `Auto-Switch (${info.switchInterval}ms)` 
-                            : `Manual (${rxProtocolName})`;
-                        window.UI.addLogEntry(`Device ready: Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Mode: ${protocolModeTextLog}`, 'success');
+                        window.UI.addLogEntry(`Device ready: Firmware v${info.fwVersionMajor}.${info.fwVersionMinor} | Mode: Manual (${rxProtocolName})`, 'success');
                         this.state.firmwareInfoLogged = true;
                     }
                 } else {
@@ -548,7 +690,18 @@ class App {
                     this.state.protocols[1].tx = stats.meshtasticTx;
                     this.state.conversionErrors = stats.conversionErrors;
                     
-                    // Update UI (UI functions still use protocol-specific names for backward compatibility)
+                    // Update statistics charts dynamically for each protocol
+                    if (window.Statistics) {
+                        for (let i = 0; i < window.ProtocolRegistry.PROTOCOL_COUNT; i++) {
+                            // Map protocol IDs to stats (0=MeshCore, 1=Meshtastic)
+                            const rxCount = i === 0 ? stats.meshcoreRx : stats.meshtasticRx;
+                            const txCount = i === 0 ? stats.meshcoreTx : stats.meshtasticTx;
+                            window.Statistics.updateProtocolStats(i, rxCount, txCount);
+                        }
+                        window.Statistics.updateErrors(stats.conversionErrors);
+                    }
+                    
+                    // Legacy UI updates (for backward compatibility)
                     window.UI.updateMeshCoreRx(stats.meshcoreRx);
                     window.UI.updateMeshtasticRx(stats.meshtasticRx);
                     window.UI.updateMeshCoreTx(stats.meshcoreTx);
@@ -580,7 +733,14 @@ class App {
                 
             case window.Protocol.RESP_DEBUG_LOG:
                 const message = window.Protocol.decodeDebugLog(data);
-                window.UI.addLogEntry(message, 'info');
+                // Statistics messages (containing "RX:" and "TX:") should only be console logged, not added to event log
+                // Event log should only contain actual events like packet received, config changes, errors, etc.
+                if (message && (message.includes('RX:') || message.includes('TX:'))) {
+                    console.log(`[Stats] ${message}`);
+                } else {
+                    // Other debug messages (errors, config changes, etc.) go to event log
+                    window.UI.addLogEntry(message, 'info');
+                }
                 break;
                 
             case window.Protocol.RESP_ERROR:

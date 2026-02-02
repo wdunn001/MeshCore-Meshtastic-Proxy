@@ -1,4 +1,4 @@
-#include "protocol_impl.h"
+#include "protocol_meshtastic.h"
 #include "../protocol_manager.h"
 #include "../canonical_packet.h"
 #include "../../radio/radio_interface.h"
@@ -9,41 +9,28 @@
 extern USBComm usbComm;
 
 // Meshtastic packet handler implementation
+// ULTRA-LENIENT: Forward ANY packet bytes - no validation, no filtering
+// Accepts packets of ANY length and structure - just relay everything
 static bool meshtastic_handlePacket(const uint8_t* data, uint8_t len, ProtocolRuntimeState* state, uint8_t* output, uint8_t* outputLen) {
-    if (state == nullptr || output == nullptr || outputLen == nullptr) {
+    if (state == nullptr || output == nullptr || outputLen == nullptr || data == nullptr) {
         return false;
     }
     
-    // Parse Meshtastic packet
-    MeshtasticHeader header;
-    uint8_t payload[255];
-    uint8_t payloadLen = 0;
-    
-    if (!meshtastic_parsePacket(data, len, &header, payload, &payloadLen)) {
-        state->stats.parseErrors++;
-        char errorMsg[40];
-        if (len < MESHTASTIC_HEADER_SIZE) {
-            snprintf(errorMsg, sizeof(errorMsg), "ERR: MT too short %d<%d", len, MESHTASTIC_HEADER_SIZE);
-        } else {
-            snprintf(errorMsg, sizeof(errorMsg), "ERR: MT parse fail len=%d", len);
-        }
-        usbComm.sendDebugLog(errorMsg);
-        return false;
+    // Accept packets of ANY length - no validation
+    // Clamp to max size if needed, but don't reject
+    uint8_t copyLen = len;
+    if (copyLen > MAX_MESHTASTIC_PACKET_SIZE) {
+        copyLen = MAX_MESHTASTIC_PACKET_SIZE;
     }
     
-    // Filter out MQTT-originated packets
-    if (meshtastic_isViaMqtt(&header)) {
-        return false;  // Silently drop MQTT packets
+    // For relay: just copy the raw packet bytes
+    // No parsing, no filtering, no validation - just forward everything
+    if (copyLen > 0) {
+        memcpy(output, data, copyLen);
     }
+    *outputLen = copyLen;
     
     state->stats.rxCount++;
-    
-    // Convert to MeshCore format
-    if (!meshtastic_convertToMeshCore(&header, payload, payloadLen, output, outputLen)) {
-        state->stats.conversionErrors++;
-        usbComm.sendDebugLog("ERR: MT->MC conv fail");
-        return false;
-    }
     
     return true;
 }
@@ -71,63 +58,60 @@ static uint8_t meshtastic_getMaxPacketSize() {
 }
 
 // Parse packet (wrapper for handler)
+// ULTRA-LENIENT: Accept ANY packet - no validation at all
+// We forward everything regardless of structure, length, or content
 static bool meshtastic_parsePacketWrapper(const uint8_t* data, uint8_t len, void* packet) {
-    if (packet == nullptr) {
+    // Accept packets of ANY length - no validation
+    // Just check that we have valid pointers
+    if (packet == nullptr || data == nullptr) {
         return false;
     }
-    MeshtasticHeader* header = (MeshtasticHeader*)packet;
-    uint8_t payload[255];
-    uint8_t payloadLen = 0;
-    return meshtastic_parsePacket(data, len, header, payload, &payloadLen);
+    
+    // Accept packets of any length (even 0 bytes)
+    // No structure validation - we're just relaying raw bytes
+    return true;
 }
 
 // Convert Meshtastic packet to canonical format
+// ULTRA-LENIENT: Forward ANY packet bytes without ANY validation
+// This allows the proxy to relay ALL Meshtastic packets regardless of:
+// - Region (frequency)
+// - Channel (sync word)
+// - Packet structure
+// - Packet length
+// We just forward raw bytes - let the receiver decide if it's valid
 static bool meshtastic_convertToCanonical(const uint8_t* data, uint8_t len, CanonicalPacket* canonical) {
     if (data == nullptr || canonical == nullptr) {
         return false;
     }
     
-    // Parse Meshtastic packet
-    MeshtasticHeader header;
-    uint8_t payload[255];
-    uint8_t payloadLen = 0;
-    
-    if (!meshtastic_parsePacket(data, len, &header, payload, &payloadLen)) {
-        return false;
-    }
-    
-    // Filter MQTT packets
-    if (meshtastic_isViaMqtt(&header)) {
-        return false;
+    // Accept packets of ANY length (even 0 bytes, though that's unlikely)
+    // No validation - just forward everything
+    if (len > 255) {
+        len = 255; // Clamp to max uint8_t
     }
     
     canonical_packet_init(canonical);
     
-    // Extract addressing
-    canonical->sourceAddress = header.from;
-    canonical->destinationAddress = header.to;
-    canonical->packetId = header.id;
-    
-    // Extract routing info
-    canonical->hopLimit = meshtastic_getHopLimit(&header);
-    canonical->wantAck = (header.flags & PACKET_FLAGS_WANT_ACK_MASK) != 0;
-    canonical->viaMqtt = meshtastic_isViaMqtt(&header);
-    canonical->channel = header.channel;
-    
-    // Determine route type from destination
-    if (meshtastic_isBroadcast(&header)) {
-        canonical->routeType = CANONICAL_ROUTE_BROADCAST;
-    } else {
-        canonical->routeType = CANONICAL_ROUTE_DIRECT;
+    // For Meshtastic relay: just copy raw packet bytes as payload
+    // This preserves the entire packet structure for forwarding
+    canonical->payloadLength = len;
+    if (canonical->payloadLength > CANONICAL_MAX_PAYLOAD) {
+        canonical->payloadLength = CANONICAL_MAX_PAYLOAD; // Truncate if too large
+    }
+    if (canonical->payloadLength > 0) {
+        memcpy(canonical->payload, data, canonical->payloadLength);
     }
     
-    // Copy payload (Meshtastic payload is typically protobuf-encoded)
-    canonical->payloadLength = payloadLen;
-    if (canonical->payloadLength > 0 && canonical->payloadLength <= CANONICAL_MAX_PAYLOAD) {
-        memcpy(canonical->payload, payload, payloadLen);
-    }
-    
-    // Default message type (Meshtastic uses protobuf, so we can't easily determine type)
+    // Set minimal canonical fields (we don't parse, so use defaults)
+    canonical->sourceAddress = 0;
+    canonical->destinationAddress = 0xFFFFFFFF; // Assume broadcast
+    canonical->packetId = 0;
+    canonical->hopLimit = 0;
+    canonical->wantAck = false;
+    canonical->viaMqtt = false;
+    canonical->channel = 0;
+    canonical->routeType = CANONICAL_ROUTE_BROADCAST; // Assume broadcast for relay
     canonical->messageType = CANONICAL_MSG_DATA;
     canonical->version = 1;
     
@@ -135,6 +119,8 @@ static bool meshtastic_convertToCanonical(const uint8_t* data, uint8_t len, Cano
 }
 
 // Convert canonical format to Meshtastic packet
+// SIMPLIFIED: Just copy raw packet bytes back (reverse of convertToCanonical)
+// This preserves the original Meshtastic packet structure
 static bool meshtastic_convertFromCanonical(const CanonicalPacket* canonical, uint8_t* output, uint8_t* outputLen) {
     if (canonical == nullptr || output == nullptr || outputLen == nullptr) {
         return false;
@@ -144,33 +130,15 @@ static bool meshtastic_convertFromCanonical(const CanonicalPacket* canonical, ui
         return false;
     }
     
-    // Build Meshtastic header
-    MeshtasticHeader* header = (MeshtasticHeader*)output;
-    header->to = canonical->destinationAddress;
-    header->from = canonical->sourceAddress;
-    header->id = canonical->packetId;
-    
-    // Build flags
-    header->flags = canonical->hopLimit & PACKET_FLAGS_HOP_LIMIT_MASK;
-    if (canonical->wantAck) {
-        header->flags |= PACKET_FLAGS_WANT_ACK_MASK;
-    }
-    if (canonical->viaMqtt) {
-        header->flags |= PACKET_FLAGS_VIA_MQTT_MASK;
+    // For Meshtastic relay: just copy the raw packet bytes back
+    // The payload contains the original Meshtastic packet
+    if (canonical->payloadLength == 0 || canonical->payloadLength > MAX_MESHTASTIC_PACKET_SIZE) {
+        return false;
     }
     
-    header->channel = canonical->channel;
-    header->next_hop = 0;
-    header->relay_node = 0;
+    memcpy(output, canonical->payload, canonical->payloadLength);
+    *outputLen = canonical->payloadLength;
     
-    // Copy payload
-    uint8_t offset = MESHTASTIC_HEADER_SIZE;
-    if (canonical->payloadLength > 0 && canonical->payloadLength <= MAX_MESHTASTIC_PAYLOAD_SIZE) {
-        memcpy(&output[offset], canonical->payload, canonical->payloadLength);
-        offset += canonical->payloadLength;
-    }
-    
-    *outputLen = offset;
     return true;
 }
 

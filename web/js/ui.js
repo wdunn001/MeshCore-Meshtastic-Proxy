@@ -17,34 +17,53 @@ const UI = {
     },
 
     updateMeshCoreRx(count) {
-        document.getElementById('meshcoreRx').textContent = count.toLocaleString();
+        // Legacy function - elements may not exist if using Chart.js statistics
+        const element = document.getElementById('meshcoreRx');
+        if (element) {
+            element.textContent = count.toLocaleString();
+        }
     },
 
     updateMeshtasticRx(count) {
-        document.getElementById('meshtasticRx').textContent = count.toLocaleString();
+        // Legacy function - elements may not exist if using Chart.js statistics
+        const element = document.getElementById('meshtasticRx');
+        if (element) {
+            element.textContent = count.toLocaleString();
+        }
     },
 
     updateMeshCoreTx(count) {
-        document.getElementById('meshcoreTx').textContent = count.toLocaleString();
+        // Legacy function - elements may not exist if using Chart.js statistics
+        const element = document.getElementById('meshcoreTx');
+        if (element) {
+            element.textContent = count.toLocaleString();
+        }
     },
 
     updateMeshtasticTx(count) {
-        document.getElementById('meshtasticTx').textContent = count.toLocaleString();
+        // Legacy function - elements may not exist if using Chart.js statistics
+        const element = document.getElementById('meshtasticTx');
+        if (element) {
+            element.textContent = count.toLocaleString();
+        }
     },
 
     updateConversionErrors(count) {
+        // Legacy function - elements may not exist if using Chart.js statistics
         const element = document.getElementById('conversionErrors');
-        const statItem = element.closest('.stat-item');
-        element.textContent = count.toLocaleString();
-        if (count > 0) {
-            element.style.color = '#dc3545';
-            if (statItem) {
-                statItem.classList.add('error-stat');
-            }
-        } else {
-            element.style.color = '#28a745';
-            if (statItem) {
-                statItem.classList.remove('error-stat');
+        if (element) {
+            const statItem = element.closest('.stat-item');
+            element.textContent = count.toLocaleString();
+            if (count > 0) {
+                element.style.color = '#dc3545';
+                if (statItem) {
+                    statItem.classList.add('error-stat');
+                }
+            } else {
+                element.style.color = '#28a745';
+                if (statItem) {
+                    statItem.classList.remove('error-stat');
+                }
             }
         }
     },
@@ -113,12 +132,14 @@ const UI = {
         }
     },
 
-    updateDeviceStatus(activity, uptime, protocolSwitches, lastActivity) {
+    updateDeviceStatus(activity, uptime, protocolSwitches, lastActivity, platform) {
+        const platformEl = document.getElementById('devicePlatform');
         const activityEl = document.getElementById('deviceActivity');
         const uptimeEl = document.getElementById('deviceUptime');
         const switchesEl = document.getElementById('protocolSwitches');
         const lastActivityEl = document.getElementById('lastActivity');
         
+        if (platformEl) platformEl.textContent = platform || '--';
         if (activityEl) activityEl.textContent = activity || 'Idle';
         if (uptimeEl) uptimeEl.textContent = uptime || '--';
         if (switchesEl) switchesEl.textContent = (protocolSwitches || 0).toLocaleString();
@@ -126,6 +147,8 @@ const UI = {
     },
 
     updateSwitchInterval(intervalMs) {
+        // Auto-switch removed - this function kept for compatibility but does nothing
+        return;
         const input = document.getElementById('switchIntervalInput');
         const display = document.getElementById('switchIntervalDisplay');
         
@@ -141,22 +164,8 @@ const UI = {
     },
 
     updateProtocolSelect(desiredProtocolMode, switchInterval) {
-        const protocolSelect = document.getElementById('protocolSelect');
-        const protocolDisplay = document.getElementById('protocolDisplay');
-        
-        if (protocolSelect && protocolDisplay) {
-            // Map: 0=MeshCore, 1=Meshtastic, 2=Auto-Switch -> 0=Manual, 2=Auto-Switch
-            const modeValue = desiredProtocolMode === 2 ? 2 : 0;
-            protocolSelect.value = modeValue.toString();
-            
-            if (desiredProtocolMode === 2) {
-                // Auto-switch mode - show interval
-                protocolDisplay.textContent = `Current: Auto-Switch (${switchInterval}ms)`;
-            } else {
-                // Manual mode
-                protocolDisplay.textContent = `Current: Manual`;
-            }
-        }
+        // Auto-switch removed - this function kept for compatibility but does nothing
+        // Protocol mode UI elements removed from HTML
     },
 
     updateListenProtocol(currentProtocol) {
@@ -173,23 +182,62 @@ const UI = {
     },
 
     updateTransmitProtocols(listenProtocol) {
-        const transmitProtocolsDisplay = document.getElementById('transmitProtocolsDisplay');
+        // DEPRECATED: This function is kept for compatibility but should not be used
+        // Use updateTransmitProtocolsFromListen() in app.js instead
+        // This function is only here in case it's called from somewhere else
+        console.warn('updateTransmitProtocols() called - this may reset checkbox states. Use updateTransmitProtocolsFromListen() instead.');
         
-        // Transmit protocols are all except the listen protocol
-        const protocols = [];
+        // Update visibility based on listen protocol
+        // Count visible options
+        let visibleCount = 0;
+        let visibleCheckbox = null;
+        
         for (let i = 0; i < ProtocolRegistry.PROTOCOL_COUNT; i++) {
             const checkbox = document.getElementById(`transmitProtocol${i}`);
-            if (checkbox) {
-                checkbox.checked = (listenProtocol !== i);
-                if (listenProtocol !== i) {
-                    protocols.push(ProtocolRegistry.getName(i));
+            const label = checkbox ? checkbox.closest('label.checkbox-label') : null;
+            
+            if (checkbox && label) {
+                if (listenProtocol === i) {
+                    // Hide the checkbox for the listen protocol
+                    label.style.display = 'none';
+                    // Uncheck if it was checked (to prevent TX on same protocol as RX)
+                    if (checkbox.checked) {
+                        checkbox.checked = false;
+                    }
+                    checkbox.disabled = true;
+                } else {
+                    // Show the checkbox
+                    label.style.display = '';
+                    visibleCount++;
+                    visibleCheckbox = checkbox;
                 }
             }
         }
         
-        if (transmitProtocolsDisplay) {
-            transmitProtocolsDisplay.textContent = `Current: ${protocols.join(', ') || 'None'}`;
+        // If only one TX protocol option is available, auto-check and disable it
+        if (visibleCount === 1 && visibleCheckbox) {
+            visibleCheckbox.checked = true;
+            visibleCheckbox.disabled = true;
         }
+        
+        // Update display text based on current checkbox states
+        this.updateTransmitProtocolsDisplay();
+    },
+
+    updateTransmitProtocolsDisplay() {
+        // Update display text based on current checkbox states
+        const transmitProtocolsDisplay = document.getElementById('transmitProtocolsDisplay');
+        if (!transmitProtocolsDisplay) return;
+        
+        const protocols = [];
+        for (let i = 0; i < ProtocolRegistry.PROTOCOL_COUNT; i++) {
+            const checkbox = document.getElementById(`transmitProtocol${i}`);
+            if (checkbox && checkbox.checked) {
+                protocols.push(ProtocolRegistry.getName(i));
+            }
+        }
+        
+        transmitProtocolsDisplay.textContent = `Current: ${protocols.join(', ') || 'None'}`;
     },
 
     updateProtocolParams(meshcoreFreq, meshcoreBw, meshtasticFreq, meshtasticBw) {
@@ -261,7 +309,7 @@ const UI = {
         document.getElementById('testBothBtn').disabled = !connected;
         document.getElementById('saveSettingsBtn').disabled = !connected;
         document.getElementById('cancelSettingsBtn').disabled = !connected;
-        document.getElementById('protocolSelect').disabled = !connected;
+        // protocolSelect removed - auto-switch removed from UI
         document.getElementById('listenProtocolSelect').disabled = !connected;
         // Update transmit protocol checkboxes dynamically
         for (let i = 0; i < ProtocolRegistry.PROTOCOL_COUNT; i++) {
@@ -270,13 +318,7 @@ const UI = {
                 checkbox.disabled = !connected;
             }
         }
-        // Interval input and other controls enabled state is controlled by protocol mode
-        const protocolSelect = document.getElementById('protocolSelect');
-        const intervalInput = document.getElementById('switchIntervalInput');
-        if (intervalInput && protocolSelect) {
-            const isAutoSwitch = parseInt(protocolSelect.value) === 2;
-            intervalInput.disabled = !connected || !isAutoSwitch;
-        }
+        // Auto-switch removed - interval input removed from UI
         document.getElementById('meshcoreFreqInput').disabled = !connected;
         document.getElementById('meshcoreBwSelect').disabled = !connected;
         document.getElementById('meshtasticFreqInput').disabled = !connected;

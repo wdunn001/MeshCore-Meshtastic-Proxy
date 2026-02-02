@@ -1,6 +1,6 @@
 #include "protocol_interface.h"
-#include "meshcore/protocol_impl.h"
-#include "meshtastic/protocol_impl.h"
+#include "meshcore/protocol_meshcore.h"
+#include "meshtastic/protocol_meshtastic.h"
 
 /**
  * Protocol Interface Implementation

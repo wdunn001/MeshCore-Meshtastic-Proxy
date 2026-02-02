@@ -40,9 +40,12 @@
 #define MODE_TX                  0x03
 #define MODE_RX_CONTINUOUS       0x05
 
-// IRQ Flags
+// IRQ Flags (SX1276 REG_IRQ_FLAGS bits)
 #define IRQ_TX_DONE_MASK         0x08
 #define IRQ_RX_DONE_MASK         0x40
+#define IRQ_CRC_ERROR_MASK       0x20  // Payload CRC error
+#define IRQ_HEADER_VALID_MASK    0x10  // Valid header received
+#define IRQ_HEADER_ERROR_MASK    0x08  // Header CRC error (also used for TX_DONE)
 
 // Frequency Range Constants (SX1276: 137-1020 MHz)
 #define SX1276_MIN_FREQUENCY_HZ  137000000UL
@@ -73,5 +76,7 @@ void sx1276_direct_attachInterrupt(void (*handler)());
 bool sx1276_direct_isPacketReceived();
 uint8_t sx1276_direct_getPacketLength();
 void sx1276_direct_clearIrqFlags();
+uint16_t sx1276_direct_getIrqFlags();
+bool sx1276_direct_hasPacketErrors();
 
 #endif // SX1276_DIRECT_H

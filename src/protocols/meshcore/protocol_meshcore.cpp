@@ -1,4 +1,4 @@
-#include "protocol_impl.h"
+#include "protocol_meshcore.h"
 #include "../protocol_manager.h"
 #include "../canonical_packet.h"
 #include "../../radio/radio_interface.h"

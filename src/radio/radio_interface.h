@@ -181,6 +181,19 @@ uint8_t radio_getPacketLength();
  */
 void radio_clearIrqFlags();
 
+/**
+ * Get IRQ status flags
+ * @return 16-bit IRQ status flags
+ */
+uint16_t radio_getIrqFlags();
+
+/**
+ * Check if received packet has CRC or header errors
+ * Should be called after radio_isPacketReceived() returns true
+ * @return true if packet has errors and should be rejected, false if valid
+ */
+bool radio_hasPacketErrors();
+
 // ============================================================================
 // Compatibility Macros (for legacy code using sx1276_* naming)
 // ============================================================================

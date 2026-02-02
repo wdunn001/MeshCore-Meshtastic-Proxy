@@ -281,3 +281,17 @@ uint8_t sx1276_direct_getPacketLength() {
 void sx1276_direct_clearIrqFlags() {
     sx1276_writeReg(REG_IRQ_FLAGS, 0xFF); // Clear all flags
 }
+
+uint16_t sx1276_direct_getIrqFlags() {
+    // SX1276 IRQ flags are 8-bit (unlike SX1262 which is 16-bit)
+    return (uint16_t)sx1276_readReg(REG_IRQ_FLAGS);
+}
+
+bool sx1276_direct_hasPacketErrors() {
+    uint16_t irqFlags = sx1276_direct_getIrqFlags();
+    // Check CRC error (bit 5 = 0x20)
+    if (irqFlags & IRQ_CRC_ERROR_MASK) {
+        return true; // CRC error - packet corrupted
+    }
+    return false; // No errors detected (SX1276 doesn't have header error flag)
+}

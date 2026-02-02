@@ -10,12 +10,13 @@
 #include "usb_comm.h"
 
 // Global state variables (accessible from usb_comm.cpp)
-ProtocolId rx_protocol = PROTOCOL_MESHCORE;      // Currently listening protocol
+ProtocolId rx_protocol = (ProtocolId)0;      // Currently listening protocol
 ProtocolId tx_protocols[PROTOCOL_COUNT];         // Protocols to transmit to (relay targets)
 uint8_t tx_protocol_count = 0;                   // Number of active transmit protocols
 unsigned long lastProtocolSwitch = 0;
 uint16_t protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
 bool autoSwitchEnabled = true;
+static ProtocolId lastConfiguredProtocol = PROTOCOL_COUNT; // Track last configured protocol to avoid spam
 uint8_t desiredProtocolMode = 2; // 0=MeshCore, 1=Meshtastic, 2=Auto-Switch
 
 // Legacy ProtocolState for USB comm compatibility
@@ -54,19 +55,34 @@ void onPacketReceived() {
 }
 
 void configureProtocol(ProtocolId protocol) {
+    // Skip if already configured for this protocol (prevents spam)
+    if (protocol == lastConfiguredProtocol) {
+        return;
+    }
+    
     ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
     ProtocolConfig* config = protocol_manager_getConfig(protocol);
     
     if (iface && config) {
+        // Configure radio - no debug log here (logged at protocol switch level instead)
         iface->configure(config);
         protocolStates[protocol].isActive = true;
+        lastConfiguredProtocol = protocol; // Remember what we configured
+        
+        // Debug: Log when Meshtastic is configured (to help diagnose reception issues)
+        if (protocol == PROTOCOL_MESHTASTIC) {
+            char debugMsg[100];
+            snprintf(debugMsg, sizeof(debugMsg), "Meshtastic RX: %.3f MHz SF=%d BW=%d Sync=0x%02X", 
+                     config->frequencyHz / 1000000.0, config->spreadingFactor, config->bandwidth, config->syncWord);
+            usbComm.sendDebugLog(debugMsg);
+        }
     }
 }
 
 void update_tx_protocols(ProtocolId rx_protocol) {
     // With canonical format, we can relay to all other protocols
     tx_protocol_count = 0;
-    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+    for (ProtocolId id = (ProtocolId)0; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
         if (id != rx_protocol) {
             tx_protocols[tx_protocol_count++] = id;
         }
@@ -76,7 +92,7 @@ void update_tx_protocols(ProtocolId rx_protocol) {
 void set_tx_protocols(uint8_t bitmask) {
     // Set transmit protocols from bitmask (bit 0 = MeshCore, bit 1 = Meshtastic)
     tx_protocol_count = 0;
-    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+    for (ProtocolId id = (ProtocolId)0; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
         uint8_t bit = (uint8_t)id;
         if ((bitmask >> bit) & 0x01) {
             // Don't allow transmitting to the same protocol we're listening to
@@ -88,14 +104,23 @@ void set_tx_protocols(uint8_t bitmask) {
 }
 
 void set_rx_protocol(ProtocolId protocol) {
-    // Set the listen protocol and update transmit protocols
+    // Set the listen protocol
     rx_protocol = protocol;
     currentProtocol = (ProtocolState)protocol;
     
-    // Update transmit protocol list (exclude listen protocol)
-    update_tx_protocols(rx_protocol);
+    // Debug: Log RX protocol change
+    ProtocolInterfaceImpl* iface = protocol_interface_get(protocol);
+    const char* protocolName = iface && iface->name ? iface->name : "Unknown";
+    char debugMsg[50];
+    snprintf(debugMsg, sizeof(debugMsg), "RX protocol set to: %s", protocolName);
+    usbComm.sendDebugLog(debugMsg);
+    
+    // DON'T auto-update TX protocols - user controls them explicitly via CMD_SET_TX_PROTOCOLS
+    // The set_tx_protocols() function already prevents TX on the same protocol as RX
     
     // Configure radio for new listen protocol
+    // Force reconfiguration by resetting lastConfiguredProtocol
+    lastConfiguredProtocol = PROTOCOL_COUNT;
     configureProtocol(protocol);
     lastProtocolSwitch = millis();
 }
@@ -105,16 +130,61 @@ bool receivePacket(uint8_t* buffer, uint8_t* len) {
         return false;
     }
     
-    *len = radio_getPacketLength();
-    ProtocolInterfaceImpl* currentIface = protocol_interface_get(rx_protocol);
+    // Check for packet errors (CRC, header) BEFORE reading packet (like Meshtastic does)
+    // This filters out noise packets that fail CRC or have header errors
+    // TEMPORARILY DISABLED: May be too aggressive if transmitting devices don't use CRC
+    // TODO: Make CRC checking configurable or check CRC status after reading packet
+    /*
+    if (radio_hasPacketErrors()) {
+        // Packet has CRC or header errors - reject this corrupted/noise packet
+        // Debug: Log the rejection
+        ProtocolInterfaceImpl* rxIface = protocol_interface_get(rx_protocol);
+        const char* rxName = rxIface && rxIface->name ? rxIface->name : "Unknown";
+        char errorMsg[50];
+        snprintf(errorMsg, sizeof(errorMsg), "RX %s: CRC/header error - rejected", rxName);
+        usbComm.sendDebugLog(errorMsg);
+        radio_clearIrqFlags();
+        radio_setMode(MODE_RX_CONTINUOUS);
+        return false;
+    }
+    */
     
-    if (*len == 0 || (currentIface && *len > currentIface->getMaxPacketSize())) {
+    // Follow RadioLib pattern: get packet length FIRST (reads RX buffer status)
+    // This gives us both the length and ensures we have valid packet data
+    *len = radio_getPacketLength();
+    
+    // Validate length BEFORE reading - reject 255 as it usually indicates buffer corruption
+    if (*len == 0 || *len == 255 || *len > 255) {
+        // Invalid length - clear and return
         radio_clearIrqFlags();
         radio_setMode(MODE_RX_CONTINUOUS);
         return false;
     }
     
+    // Check against protocol max packet size
+    ProtocolInterfaceImpl* currentIface = protocol_interface_get(rx_protocol);
+    if (currentIface && *len > currentIface->getMaxPacketSize()) {
+        radio_clearIrqFlags();
+        radio_setMode(MODE_RX_CONTINUOUS);
+        return false;
+    }
+    
+    // Read FIFO with the correct length
+    // Note: readFifo reads RX buffer status again internally, but we trust our length
+    // and readFifo will clamp to our length if RX buffer status is corrupted
     radio_readFifo(buffer, *len);
+    
+    // Verify the length wasn't corrupted during read
+    // readFifo sets last_packet_length, so check it matches
+    uint8_t verifyLen = radio_getPacketLength();
+    if (verifyLen != *len && (verifyLen == 255 || verifyLen == 0)) {
+        // Length was corrupted during read - reject this packet
+        radio_clearIrqFlags();
+        radio_setMode(MODE_RX_CONTINUOUS);
+        return false;
+    }
+    
+    // Clear IRQ flags after reading
     radio_clearIrqFlags();
     
     return true;
@@ -124,6 +194,9 @@ bool transmitPacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
     if (len == 0 || len > 255) {
         return false;
     }
+    
+    // Save current listening protocol to restore after TX
+    ProtocolId savedRxProtocol = rx_protocol;
     
     // Configure radio for target protocol
     configureProtocol(protocol);
@@ -135,24 +208,30 @@ bool transmitPacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
     radio_writeFifo((uint8_t*)data, len);
     radio_clearIrqFlags();
     radio_setMode(MODE_TX);
-    delay(5);
     
-    // Wait for transmission to complete
+    // Wait for transmission to complete (use timeout - IRQ flags are platform-specific)
+    // LoRa packets take: (preamble + payload) * symbol_time
+    // For SF7: symbol_time ~= 1ms, so even long packets complete in <100ms
+    // Use 500ms timeout to be safe
     unsigned long startTime = millis();
-    while (millis() - startTime < 200) {
+    while (millis() - startTime < 500) {
         delay(1);
-    }
-    if (millis() - startTime > 5000) {
-        radio_setMode(MODE_STDBY);
-        delay(10);
-        return false;
     }
     
     radio_clearIrqFlags();
     radio_setMode(MODE_STDBY);
     delay(10);
     
-    return true;
+    // CRITICAL: Switch back to listening protocol and RX mode
+    // Reset lastConfiguredProtocol so we reconfigure even if it's the same protocol
+    // This ensures we always return to RX mode after TX
+    lastConfiguredProtocol = PROTOCOL_COUNT; // Force reconfiguration
+    configureProtocol(savedRxProtocol);
+    
+    // Ensure we're in RX mode (configureProtocol should do this, but be explicit)
+    radio_setMode(MODE_RX_CONTINUOUS);
+    
+    return true; // TX completed (timeout-based, no IRQ check needed)
 }
 
 void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
@@ -167,15 +246,35 @@ void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
     CanonicalPacket canonical;
     if (!iface->convertToCanonical(data, len, &canonical)) {
         state->stats.parseErrors++;
-        char errorMsg[40];
-        snprintf(errorMsg, sizeof(errorMsg), "ERR: %s parse fail len=%d", iface->name, len);
-        usbComm.sendDebugLog(errorMsg);
-        return;
+        // For Meshtastic: be more lenient - if it's Meshtastic protocol, still try to forward
+        if (protocol == PROTOCOL_MESHTASTIC) {
+            // Meshtastic relay mode: forward even if conversion fails
+            // Just copy raw bytes directly
+            canonical_packet_init(&canonical);
+            canonical.payloadLength = (len > CANONICAL_MAX_PAYLOAD) ? CANONICAL_MAX_PAYLOAD : len;
+            memcpy(canonical.payload, data, canonical.payloadLength);
+            canonical.messageType = CANONICAL_MSG_DATA;
+            canonical.routeType = CANONICAL_ROUTE_BROADCAST;
+            canonical.version = 1;
+        } else {
+            char errorMsg[60];
+            snprintf(errorMsg, sizeof(errorMsg), "ERR: %s parse fail len=%d (first bytes: %02X %02X %02X)", 
+                     iface->name, len, len > 0 ? data[0] : 0, len > 1 ? data[1] : 0, len > 2 ? data[2] : 0);
+            usbComm.sendDebugLog(errorMsg);
+            return;
+        }
     }
     
-    // Filter MQTT packets
-    if (canonical.viaMqtt) {
-        return;  // Silently drop MQTT packets
+    // Debug: Log successful parse (or relay for Meshtastic)
+    char successMsg[50];
+    snprintf(successMsg, sizeof(successMsg), "%s %s: %d bytes", iface->name, 
+             protocol == PROTOCOL_MESHTASTIC ? "relay" : "parse OK", len);
+    usbComm.sendDebugLog(successMsg);
+    
+    // Filter MQTT packets (only if we successfully parsed and detected MQTT)
+    // For Meshtastic relay mode, we don't parse so we can't filter MQTT
+    if (protocol != PROTOCOL_MESHTASTIC && canonical.viaMqtt) {
+        return;  // Silently drop MQTT packets (only for parsed protocols)
     }
     
     state->stats.rxCount++;
@@ -250,7 +349,7 @@ void printStatistics() {
     int offset = 0;
     
     // Print statistics for each protocol dynamically
-    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+    for (ProtocolId id = (ProtocolId)0; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
         ProtocolInterfaceImpl* iface = protocol_interface_get(id);
         ProtocolRuntimeState* state = &protocolStates[id];
         
@@ -315,7 +414,18 @@ void setup() {
     
     // Initialize USB Serial (platform-specific config)
     Serial.begin(platform_getSerialBaud());
-    delay(2000);
+    
+    // Wait for USB Serial connection (important for Arduino Leonardo/LoRa32u4II)
+    // On boards with native USB, Serial might not be immediately available
+    // However, don't block forever - timeout after 3 seconds to allow operation without USB
+    #ifdef ARDUINO_AVR_LEONARDO
+        uint32_t serialWaitStart = millis();
+        while (!Serial && (millis() - serialWaitStart < 3000)) {
+            delay(10); // Wait for USB Serial to be ready (max 3 seconds)
+        }
+    #endif
+    
+    delay(2000); // Give serial monitor time to connect
     
     Serial.println("MeshCore-Meshtastic Proxy Starting...");
     
@@ -336,30 +446,35 @@ void setup() {
     protocol_manager_init();
     
     // Initialize protocol states dynamically
-    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+    for (ProtocolId id = (ProtocolId)0; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
         protocol_interface_initState(id, &protocolStates[id]);
     }
-    
-    // Initialize listen protocol (default to first available protocol)
-    rx_protocol = PROTOCOL_MESHCORE;  // Default to first protocol
-    currentProtocol = (ProtocolState)rx_protocol;
-    update_tx_protocols(rx_protocol);
     
     // Protocol configs are stored in protocolStates[].config and can be accessed
     // via protocol_manager_getConfig() or directly from protocolStates[]
     
-    protocolSwitchIntervalMs = PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT;
-    autoSwitchEnabled = true;
-    desiredProtocolMode = 2;
+    // Disable auto-switch - always listen to MeshCore (protocol 0)
+    protocolSwitchIntervalMs = 0;
+    autoSwitchEnabled = false;
+    desiredProtocolMode = 0; // MeshCore
     
-    // Configure radio for listen protocol
+    // Set RX protocol to MeshCore (protocol 0)
+    rx_protocol = (ProtocolId)0; // MeshCore
+    currentProtocol = (ProtocolState)rx_protocol;
+    
+    // Set TX protocols to both MeshCore (0) and Meshtastic (1)
+    tx_protocol_count = 0;
+    tx_protocols[tx_protocol_count++] = (ProtocolId)0; // MeshCore
+    tx_protocols[tx_protocol_count++] = (ProtocolId)1; // Meshtastic
+    
+    // Configure radio for listen protocol (MeshCore)
     configureProtocol(rx_protocol);
     lastProtocolSwitch = millis();
     
     // Print protocol information dynamically
     Serial.println("Proxy ready. Listening for packets...");
     Serial.println("Configured protocols:");
-    for (ProtocolId id = PROTOCOL_MESHCORE; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
+    for (ProtocolId id = (ProtocolId)0; id < PROTOCOL_COUNT; id = (ProtocolId)(id + 1)) {
         ProtocolInterfaceImpl* iface = protocol_interface_get(id);
         ProtocolConfig* config = protocol_manager_getConfig(id);
         
@@ -383,33 +498,24 @@ void setup() {
 void loop() {
     usbComm.process();
     
-    if (!autoSwitchEnabled || protocolSwitchIntervalMs == 0) {
-        // Manual mode - enforce desired protocol
-        ProtocolId desiredId = (desiredProtocolMode == 0) ? PROTOCOL_MESHCORE : 
-                               (desiredProtocolMode == 1) ? PROTOCOL_MESHTASTIC : rx_protocol;
-        
-        if (rx_protocol != desiredId) {
-            setProtocol((ProtocolState)desiredId);
-        }
-    } else {
-        // Auto-switch mode - rotate through protocols
-        switchProtocol();
-    }
+    // Auto-switch disabled - user controls RX/TX protocols via USB commands
+    // No automatic protocol switching - respect user's RX protocol selection
     
-    if (packetReceived) {
-        packetReceived = false;
-        
-        uint8_t packetLen = 0;
-        if (receivePacket(rxBuffer, &packetLen)) {
-            int16_t rssi = radio_getRssi();
-            int8_t snr = radio_getSnr();
-            
-            usbComm.sendRxPacket(rx_protocol, rssi, snr, rxBuffer, packetLen);
-            handlePacket(rx_protocol, rxBuffer, packetLen);
-            
-            radio_setMode(MODE_RX_CONTINUOUS);
-        } else {
-            configureProtocol(rx_protocol);
+    // Check for packet via polling (backup to interrupt)
+    static unsigned long lastDebugLog = 0;
+    unsigned long now = millis();
+    
+    // Debug: Log current listening state every 30 seconds (reduced frequency to avoid browser issues)
+    if (now - lastDebugLog > 30000) {
+        lastDebugLog = now;
+        ProtocolInterfaceImpl* rxIface = protocol_interface_get(rx_protocol);
+        ProtocolConfig* config = protocol_manager_getConfig(rx_protocol);
+        if (rxIface && config) {
+            char stateMsg[100];
+            snprintf(stateMsg, sizeof(stateMsg), "Listening: %s @ %.3f MHz SF=%d BW=%d Sync=0x%02X", 
+                     rxIface->name, config->frequencyHz / 1000000.0, 
+                     config->spreadingFactor, config->bandwidth, config->syncWord);
+            usbComm.sendDebugLog(stateMsg);
         }
     }
     
@@ -417,11 +523,53 @@ void loop() {
         packetReceived = true;
     }
     
-    static unsigned long lastStatsPrint = 0;
-    if (millis() - lastStatsPrint > 10000) {
-        printStatistics();
-        lastStatsPrint = millis();
+    if (packetReceived) {
+        packetReceived = false;
+        
+        uint8_t packetLen = 0;
+        if (receivePacket(rxBuffer, &packetLen)) {
+            // Verify packetLen was actually set (should be > 0 and <= 255)
+            if (packetLen > 0 && packetLen <= 255) {
+                int16_t rssi = radio_getRssi();
+                int8_t snr = radio_getSnr();
+                
+                // Filter out noise packets (RSSI -127 dBm means no signal, just noise)
+                // Also filter packets with invalid length (255 usually means buffer corruption)
+                if (rssi <= -127 || packetLen == 255) {
+                    // Noise or corrupted packet - ignore it
+                    radio_clearIrqFlags();
+                    radio_setMode(MODE_RX_CONTINUOUS);
+                    return; // Skip processing this packet
+                }
+                
+                // Debug: Log packet reception
+                ProtocolInterfaceImpl* rxIface = protocol_interface_get(rx_protocol);
+                const char* rxName = rxIface && rxIface->name ? rxIface->name : "Unknown";
+                char debugMsg[60];
+                snprintf(debugMsg, sizeof(debugMsg), "RX %s: RSSI=%d SNR=%d Len=%d", rxName, rssi, snr, packetLen);
+                usbComm.sendDebugLog(debugMsg);
+                
+                // Send packet to web interface
+                usbComm.sendRxPacket(rx_protocol, rssi, snr, rxBuffer, packetLen);
+                
+                // Handle packet (relay to other protocols)
+                handlePacket(rx_protocol, rxBuffer, packetLen);
+                
+                radio_setMode(MODE_RX_CONTINUOUS);
+            } else {
+                // Invalid packet length - clear and reconfigure
+                radio_clearIrqFlags();
+                configureProtocol(rx_protocol);
+            }
+        } else {
+            // Packet reception failed - reconfigure radio
+            radio_clearIrqFlags();
+            configureProtocol(rx_protocol);
+        }
     }
+    
+    // Statistics are sent via RESP_STATS when requested by the client
+    // No need to send debug log statistics periodically - they're redundant
     
     delay(1);
 }
