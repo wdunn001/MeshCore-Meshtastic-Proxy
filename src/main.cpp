@@ -282,6 +282,12 @@ void handlePacket(ProtocolId protocol, const uint8_t* data, uint8_t len) {
     // Relay to all other protocols using canonical format
     for (uint8_t i = 0; i < tx_protocol_count; i++) {
         ProtocolId targetProtocol = tx_protocols[i];
+        
+        // Safety check: Don't retransmit to the same protocol we received from
+        if (targetProtocol == protocol) {
+            continue;
+        }
+        
         ProtocolInterfaceImpl* targetIface = protocol_interface_get(targetProtocol);
         
         if (targetIface == nullptr || targetIface->convertFromCanonical == nullptr) {
@@ -462,10 +468,9 @@ void setup() {
     rx_protocol = (ProtocolId)0; // MeshCore
     currentProtocol = (ProtocolState)rx_protocol;
     
-    // Set TX protocols to both MeshCore (0) and Meshtastic (1)
-    tx_protocol_count = 0;
-    tx_protocols[tx_protocol_count++] = (ProtocolId)0; // MeshCore
-    tx_protocols[tx_protocol_count++] = (ProtocolId)1; // Meshtastic
+    // Set TX protocols to all protocols EXCEPT the RX protocol (retransmit to other protocols)
+    // Since we're listening on MeshCore, retransmit to Meshtastic
+    update_tx_protocols(rx_protocol);
     
     // Configure radio for listen protocol (MeshCore)
     configureProtocol(rx_protocol);

@@ -132,18 +132,23 @@ Wire format (as defined in `RadioInterface.cpp`):
 
 ## How It Works
 
-The proxy operates using **time-slicing** to handle both protocols with a single radio:
+The proxy operates as a **bidirectional relay** that listens continuously on one protocol and retransmits received packets to other configured protocols:
 
-1. **Time-Sliced Reception**: Alternates between listening for MeshCore packets (sync word 0x12) and Meshtastic packets (sync word 0x2B) every 100ms
-   - **Important**: The device does **NOT** listen to both protocols simultaneously
-   - It switches between protocols every 100ms (configurable via `PROTOCOL_SWITCH_INTERVAL_MS`)
-   - Each protocol gets approximately 50% of listening time
-   - This means packets may be missed if they arrive during the other protocol's time slice
-2. **Packet Detection**: Uses sync word and packet structure to identify the protocol
+1. **Continuous Reception**: Listens continuously on a single configured protocol (default: MeshCore)
+   - The radio is configured for the listening protocol's frequency and LoRa parameters
+   - Uses sync word filtering to detect packets from the listening protocol
+   - No time-slicing - the device listens exclusively to one protocol at a time
+2. **Packet Reception**: When a packet is received on the listening protocol:
+   - Packet is validated (RSSI, length, CRC)
+   - Packet is parsed according to the listening protocol's format
 3. **MQTT Filtering**: Meshtastic packets with `via_mqtt` flag set are filtered out before conversion - only radio-originated Meshtastic packets are forwarded to MeshCore (MeshCore is a pure radio mesh network)
-4. **Protocol Conversion**: Converts packet format between MeshCore and Meshtastic
-5. **Retransmission**: Immediately retransmits converted packets with appropriate LoRa parameters
-6. **Test Messages**: Automatically sends test messages on both protocols at startup, and can be triggered manually via the web interface
+4. **Protocol Conversion**: Converts packet format from the listening protocol to canonical format, then to target protocol formats
+5. **Retransmission**: Immediately retransmits converted packets to all configured transmit protocols with their appropriate LoRa parameters
+   - Each retransmission switches the radio to the target protocol's frequency and parameters
+   - After transmission, the radio returns to listening mode on the configured RX protocol
+6. **Test Messages**: Automatically sends test messages on all transmit protocols at startup, and can be triggered manually via the web interface
+
+**Note**: The proxy listens on **one protocol at a time**. To bridge both directions, you would need two proxy devices (one listening on MeshCore, one listening on Meshtastic), or use the web interface to switch the listening protocol as needed.
 
 ### Conversion Process
 
@@ -490,9 +495,9 @@ MeshCore RX: 5 | Meshtastic RX: 3 | MeshCore TX: 3 | Meshtastic TX: 5 | Errors: 
 Configuration is organized by layer, matching the architecture:
 
 ### Application Configuration (`src/config.h`)
-- **Time-Slicing**: `PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT` (default: 100ms)
-  - Controls how often the proxy switches between listening protocols
-  - Range: 50ms (minimum) to 1000ms (maximum)
+- **Protocol Switch Interval**: `PROTOCOL_SWITCH_INTERVAL_MS_DEFAULT` (default: 100ms)
+  - Legacy setting - time-slicing has been removed
+  - The proxy now listens continuously on a single configured protocol
 
 ### Protocol Configuration
 Each protocol has its own configuration file:
@@ -525,16 +530,18 @@ Each platform has its own configuration file (e.g., `src/platforms/lora32u4ii/co
 
 ## Limitations
 
-1. **Single Radio**: Cannot receive both protocols simultaneously - requires time-slicing
-   - Switches between protocols every 100ms (configurable)
-   - Each protocol gets ~50% of listening time
-   - Packets may be missed if they arrive during the other protocol's time slice
-2. **Packet Loss**: Time-slicing may cause missed packets if both protocols transmit simultaneously
+1. **Single Radio**: Cannot receive both protocols simultaneously
+   - The proxy listens continuously on one configured protocol (default: MeshCore)
+   - To bridge both directions, use two proxy devices (one listening on each protocol) or switch the listening protocol via the web interface
+   - Packets on the non-listening protocol will not be received
+2. **Unidirectional by Default**: By default, the proxy listens on MeshCore and retransmits to Meshtastic
+   - MeshCore → Meshtastic: Works (listening on MeshCore)
+   - Meshtastic → MeshCore: Requires switching the listening protocol to Meshtastic
 3. **Protocol Conversion**: Some metadata may be lost during conversion (e.g., exact routing paths)
 4. **MQTT Filtering**: Meshtastic packets originating from MQTT/internet are filtered out and not forwarded to MeshCore - only radio-originated Meshtastic packets are bridged to MeshCore
 5. **Memory Constraints**: ATMega32u4 has limited RAM (2.5KB) - buffer sizes are optimized
-6. **Frequency Switching**: The proxy switches between 910.525 MHz (MeshCore) and 906.875 MHz (Meshtastic) - ensure both frequencies are within your antenna's range
-7. **Upload Process**: Requires manual bootloader activation (double-press RESET button)
+6. **Frequency Switching**: The proxy switches frequencies when retransmitting to different protocols (910.525 MHz for MeshCore, 906.875 MHz for Meshtastic) - ensure both frequencies are within your antenna's range
+7. **Upload Process**: LoRa32u4II requires manual bootloader activation (double-press RESET button)
 
 ## Troubleshooting
 
@@ -551,13 +558,15 @@ Each platform has its own configuration file (e.g., `src/platforms/lora32u4ii/co
 ### No Packets Received
 
 1. **Check antenna**: Ensure 915MHz antenna is properly connected
-2. **Verify frequency**: 
-   - MeshCore nodes must use **910.525 MHz**
-   - Meshtastic nodes must use **906.875 MHz**
+2. **Verify listening protocol**: The proxy listens on one protocol at a time (default: MeshCore)
+   - Check which protocol the proxy is currently listening to via the web interface
+   - Packets on the non-listening protocol will not be received
+3. **Verify frequency**: 
+   - If listening on MeshCore: Nodes must use **910.525 MHz**
+   - If listening on Meshtastic: Nodes must use **906.875 MHz**
    - For spectrum analyzer: Look at these specific frequencies, not just "915 MHz"
-3. **Check sync words**: Ensure nodes are using correct sync words (0x12 for MeshCore, 0x2B for Meshtastic)
-4. **DIO1 wiring**: Verify DIO1 is connected to pin 5 (for versions < 1.3)
-5. **Time-slicing**: Remember the device alternates between protocols - packets may be missed
+4. **Check sync words**: Ensure nodes are using correct sync words (0x12 for MeshCore, 0x2B for Meshtastic)
+5. **DIO1 wiring** (LoRa32u4II only): Verify DIO1 is connected to pin 5 (for versions < 1.3)
 
 ### Test Messages Not Visible on Spectrum Analyzer
 
@@ -668,7 +677,7 @@ MeshcoreMeshstaticProxy/
 ### Key Files by Layer
 
 **Application Layer:**
-- `src/main.cpp` - Main application loop, packet handling, protocol switching
+- `src/main.cpp` - Main application loop, packet reception, protocol conversion, and retransmission
 
 **Platform Layer:**
 - `src/platforms/platform_interface.h` - Platform API definition
